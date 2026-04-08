@@ -2,7 +2,7 @@
 A toolkit for turning any media resource into a language-learning Anki deck!
 - Compatible with videos (recordings, clips, TV, movies), audio (recordings, podcasts, music), and text (books, articles, pdfs, plain text)
 - Decks designed to promote reading/writing and listening/speaking
-- Generates both EN → Foreign and Foreign → EN
+- Generates in-context translations in both directions, English → foreign and foreign → English
 
 Developed by Armin Salehipour for WVU Medical Language Learners.
 
