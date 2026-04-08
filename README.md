@@ -12,7 +12,9 @@ Developed by Armin Salehipour for WVU Medical Language Learners.
 	- [ ] UI
 	- [ ] Package into binary
 
-# Program Workflow
+# How to Use
+
+## Program Workflow
 
 **Inputs:** Audiovisual Media (supplements: .LRC → Assume song, English subs), Single text, Two texts
 
@@ -25,8 +27,6 @@ Media + .LRC → [LLM] Convert to .SRT → [LLM] Translate Subtitles → ...
 Single Text File → [LLM] Translate → [LLM] Map.json → [LLM] Gloss Map? → Anki
 
 Two Text Files → [LLM] Map.json → ...
-
-# How to Use
 
 ## Subtitle Generation
 
