@@ -1,0 +1,1305 @@
+#!/usr/bin/env python3
+"""
+Generate an Anki .apkg deck from a directory containing:
+  - one media file (video or audio)
+  - one English subtitle file named 'English.<ext>'
+  - one foreign-language subtitle file named '<Language>.<ext>'
+
+Front of each card:
+  - still image thumbnail from the subtitle interval
+  - English subtitle text
+
+Back of each card:
+  - foreign subtitle text
+  - playable media clip for the interval (video for video input, audio for audio input)
+  - optional generated TTS audio when the source media is in English
+
+Dependencies:
+  - ffmpeg / ffprobe
+  - Python packages: genanki, pysubs2
+  - Optional local TTS:
+      * macOS 'say' command (default fallback)
+      * sherpa-onnx-offline-tts with local model files
+
+Example:
+  python anki_video_deck.py /path/to/folder --deck-name "My Deck"
+  python anki_video_deck.py /path/to/folder --deck-name "French Movie" --source-language english
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import html
+import json
+import math
+import os
+import random
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unicodedata
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+try:
+    import genanki
+except ImportError:  # pragma: no cover
+    print("Missing dependency: genanki. Install with: pip install genanki", file=sys.stderr)
+    raise
+
+try:
+    import pysubs2
+except ImportError:  # pragma: no cover
+    print("Missing dependency: pysubs2. Install with: pip install pysubs2", file=sys.stderr)
+    raise
+
+
+VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".m4v", ".avi", ".webm"}
+AUDIO_EXTS = {".mp3", ".wav", ".aac", ".flac", ".ogg", ".wma", ".alac", ".pcm", ".aiff"}
+MEDIA_EXTS = VIDEO_EXTS | AUDIO_EXTS | {".mp4"}  # .mp4 may be video or audio-only
+SUB_EXTS = {".srt", ".ass", ".ssa", ".vtt", ".sub", ".ttml", ".smi", ".json", ".tmp", ".mpl2"}
+
+LANGUAGE_ALIASES = {
+    "english": "en",
+    "spanish": "es",
+    "espanol": "es",
+    "español": "es",
+    "italian": "it",
+    "french": "fr",
+    "german": "de",
+    "persian": "fa",
+    "farsi": "fa",
+    "arabic": "ar",
+    "mandarin": "zh",
+    "chinese": "zh",
+    "russian": "ru",
+    "japanese": "ja",
+    "tagalog": "tl",
+    "filipino": "tl",
+    "korean": "ko",
+    "indonesian": "id",
+}
+
+# Reasonable defaults for macOS `say`. Users can override with --say-voice.
+MACOS_SAY_VOICES = {
+    "en": "Samantha",
+    "es": "Jorge",
+    "it": "Alice",
+    "fr": "Thomas",
+    "de": "Anna",
+    "fa": None,
+    "ar": None,
+    "zh": "Tingting",
+    "ru": "Milena",
+    "ja": "Kyoko",
+    "tl": None,
+    "ko": "Yuna",
+    "id": None,
+}
+
+SUPPORTED_LANGUAGES = {
+    "es", "it", "fr", "de", "fa", "ar", "zh", "ru", "ja", "tl", "ko", "id"
+}
+
+
+def run(cmd: Sequence[str], *, capture_output: bool = False, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        list(cmd),
+        check=check,
+        text=True,
+        capture_output=capture_output,
+    )
+
+
+@dataclass
+class SubtitleLine:
+    start_ms: int
+    end_ms: int
+    text_raw: str
+    text_plain: str
+
+    @property
+    def duration_ms(self) -> int:
+        return max(0, self.end_ms - self.start_ms)
+
+
+@dataclass
+class CardItem:
+    idx: int
+    start_ms: int
+    end_ms: int
+    english_text: str
+    foreign_text: str
+    thumbnail_name: str
+    media_name: str
+    tts_name: str = ""
+    deck_name: str = ""
+    is_reverse: bool = False
+
+
+class DeckError(RuntimeError):
+    pass
+
+
+class TTSBackend:
+    def synthesize(self, text: str, language_code: str, output_path: Path) -> bool:
+        raise NotImplementedError
+
+
+class MacOSSayTTS(TTSBackend):
+    def __init__(self, preferred_voice: Optional[str] = None):
+        self.preferred_voice = preferred_voice
+        self._voices = self._load_voices()
+
+    @staticmethod
+    def _load_voices() -> Dict[str, str]:
+        if shutil.which("say") is None:
+            return {}
+        proc = run(["say", "-v", "?"], capture_output=True)
+        voices: Dict[str, str] = {}
+        for line in proc.stdout.splitlines():
+            m = re.match(r"^(\S+)\s+([a-z_\-]+)\s+", line.strip(), re.IGNORECASE)
+            if m:
+                voices[m.group(1)] = m.group(2)
+        return voices
+
+    def synthesize(self, text: str, language_code: str, output_path: Path) -> bool:
+        if shutil.which("say") is None:
+            return False
+        voice = self.preferred_voice or MACOS_SAY_VOICES.get(language_code)
+        cmd = ["say", "-o", str(output_path)]
+        if voice:
+            cmd.extend(["-v", voice])
+        cmd.append(text)
+        try:
+            run(cmd)
+            return output_path.exists() and output_path.stat().st_size > 0
+        except subprocess.CalledProcessError:
+            if voice:
+                # Retry without specifying a voice, allowing the OS default.
+                try:
+                    run(["say", "-o", str(output_path), text])
+                    return output_path.exists() and output_path.stat().st_size > 0
+                except subprocess.CalledProcessError:
+                    return False
+            return False
+
+
+class SherpaOnnxTTS(TTSBackend):
+    def __init__(
+        self,
+        model_dir: Path,
+        tokens_file: Optional[Path] = None,
+        data_dir: Optional[Path] = None,
+        dict_dir: Optional[Path] = None,
+        rule_fsts: Optional[Path] = None,
+        rule_fars: Optional[Path] = None,
+    ):
+        self.model_dir = model_dir
+        self.tokens_file = tokens_file or (model_dir / "tokens.txt")
+        self.data_dir = data_dir
+        self.dict_dir = dict_dir
+        self.rule_fsts = rule_fsts
+        self.rule_fars = rule_fars
+
+    def synthesize(self, text: str, language_code: str, output_path: Path) -> bool:
+        exe = shutil.which("sherpa-onnx-offline-tts")
+        if exe is None:
+            return False
+        model_file = self._discover_model_file()
+        if model_file is None or not self.tokens_file.exists():
+            return False
+        cmd = [
+            exe,
+            "--tokens", str(self.tokens_file),
+            "--vits-model", str(model_file),
+            "--output-filename", str(output_path),
+            text,
+        ]
+        if self.data_dir and self.data_dir.exists():
+            cmd.extend(["--data-dir", str(self.data_dir)])
+        if self.dict_dir and self.dict_dir.exists():
+            cmd.extend(["--dict-dir", str(self.dict_dir)])
+        if self.rule_fsts and self.rule_fsts.exists():
+            cmd.extend(["--rule-fsts", str(self.rule_fsts)])
+        if self.rule_fars and self.rule_fars.exists():
+            cmd.extend(["--rule-fars", str(self.rule_fars)])
+        try:
+            run(cmd)
+            return output_path.exists() and output_path.stat().st_size > 0
+        except subprocess.CalledProcessError:
+            return False
+
+    def _discover_model_file(self) -> Optional[Path]:
+        candidates = list(self.model_dir.glob("*.onnx"))
+        return candidates[0] if candidates else None
+
+
+class AutoTTS(TTSBackend):
+    def __init__(self, sherpa: Optional[SherpaOnnxTTS], say_backend: Optional[MacOSSayTTS]):
+        self.sherpa = sherpa
+        self.say_backend = say_backend
+
+    def synthesize(self, text: str, language_code: str, output_path: Path) -> bool:
+        if self.sherpa and self.sherpa.synthesize(text, language_code, output_path):
+            return True
+        if self.say_backend and self.say_backend.synthesize(text, language_code, output_path):
+            return True
+        return False
+
+
+def slugify(value: str) -> str:
+    value = unicodedata.normalize("NFKD", value)
+    value = value.encode("ascii", "ignore").decode("ascii")
+    value = re.sub(r"[^a-zA-Z0-9._-]+", "-", value).strip("-").lower()
+    return value or "item"
+
+
+def stable_int(seed: str, digits: int = 10) -> int:
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    return int(digest[:digits], 16)
+
+
+def foreign_html_text(text: str) -> str:
+    text = text.replace("\\N", "\n").replace("\\n", "\n")
+    text = text.strip()
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+
+    escaped_lines = [html.escape(line, quote=False) for line in lines]
+
+    if len(escaped_lines) == 1:
+        return escaped_lines[0]
+
+    normal_lines = escaped_lines[:-1]
+    last_line = escaped_lines[-1]
+
+    parts = []
+    if normal_lines:
+        parts.append("<br>".join(normal_lines))
+    parts.append(f'<span class="subtitle-bottom-line">{last_line}</span>')
+
+    return "<br>".join(parts)
+
+
+def html_text(text: str) -> str:
+    text = text.replace("\\N", "\n").replace("\\n", "\n")
+    text = text.strip()
+    text = html.escape(text, quote=False)
+    text = re.sub(r"\s*\n\s*", "<br>", text)
+    return text
+
+
+ASS_TAG_RE = re.compile(r"\{[^{}]*\}")
+HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def clean_subtitle_text(text: str) -> str:
+    text = text.replace("\u200b", "").replace("\ufeff", "")
+    text = ASS_TAG_RE.sub("", text)
+    text = text.replace("\\N", "\n").replace("\\n", "\n")
+    text = HTML_TAG_RE.sub("", text)
+    text = text.replace("&nbsp;", " ")
+
+    # Clean each line without destroying line breaks.
+    lines = []
+    for line in text.splitlines():
+        line = re.sub(r"[ \t]+", " ", line).strip()
+        if line:
+            lines.append(line)
+
+    return "\n".join(lines).strip()
+
+
+DIALOGUE_BLACKLIST = {
+    "[music]", "(music)", "[applause]", "(applause)", "[laughter]", "(laughter)",
+    "[inaudible]", "(inaudible)", "[silence]", "(silence)", "...",
+}
+
+
+def looks_like_dialogue(text: str) -> bool:
+    if not text:
+        return False
+
+    normalized = " ".join(text.splitlines()).strip().lower()
+    if normalized in DIALOGUE_BLACKLIST:
+        return False
+
+    letters = sum(ch.isalpha() for ch in normalized)
+    return letters > 0
+
+
+def load_subtitles(path: Path, fps: Optional[float] = None) -> List[SubtitleLine]:
+    kwargs = {}
+    if path.suffix.lower() == ".sub" and fps is not None:
+        kwargs["fps"] = fps
+    subs = pysubs2.load(str(path), **kwargs)
+    lines: List[SubtitleLine] = []
+    for item in subs:
+        text_raw = getattr(item, "text", "") or ""
+        text_plain = clean_subtitle_text(text_raw)
+        start_ms = int(getattr(item, "start", 0))
+        end_ms = int(getattr(item, "end", 0))
+        if end_ms <= start_ms:
+            continue
+        if not looks_like_dialogue(text_plain):
+            continue
+        lines.append(SubtitleLine(start_ms, end_ms, text_raw, text_plain))
+    return lines
+
+
+def ms_to_ffmpeg_time(ms: int) -> str:
+    sec = max(0, ms / 1000.0)
+    return f"{sec:.3f}"
+
+
+def probe_video_fps(video_path: Path) -> Optional[float]:
+    if shutil.which("ffprobe") is None:
+        return None
+    proc = run(
+        [
+            "ffprobe",
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=r_frame_rate",
+            "-of", "json",
+            str(video_path),
+        ],
+        capture_output=True,
+    )
+    try:
+        payload = json.loads(proc.stdout)
+        rate = payload["streams"][0]["r_frame_rate"]
+        num, den = rate.split("/")
+        num_f = float(num)
+        den_f = float(den)
+        if den_f == 0:
+            return None
+        return num_f / den_f
+    except Exception:
+        return None
+
+
+def probe_stream_types(media_path: Path) -> Tuple[bool, bool]:
+    if shutil.which("ffprobe") is None:
+        return False, False
+
+    proc = run(
+        [
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "stream=codec_type",
+            "-of", "json",
+            str(media_path),
+        ],
+        capture_output=True,
+    )
+
+    try:
+        payload = json.loads(proc.stdout)
+        streams = payload.get("streams", [])
+        has_video = any(s.get("codec_type") == "video" for s in streams)
+        has_audio = any(s.get("codec_type") == "audio" for s in streams)
+        return has_video, has_audio
+    except Exception:
+        return False, False
+
+
+def media_has_video(media_path: Path) -> bool:
+    has_video, _ = probe_stream_types(media_path)
+    return has_video
+
+
+def media_has_audio(media_path: Path) -> bool:
+    _, has_audio = probe_stream_types(media_path)
+    return has_audio
+
+
+def find_input_files(root: Path) -> Tuple[Path, Path, Path, str]:
+    media_files = [p for p in root.iterdir() if p.is_file() and p.suffix.lower() in MEDIA_EXTS]
+    if len(media_files) != 1:
+        raise DeckError(f"Expected exactly 1 media file in {root}, found {len(media_files)}")
+
+    media = media_files[0]
+    has_video, has_audio = probe_stream_types(media)
+
+    if not has_video and not has_audio:
+        raise DeckError(
+            f"Input file is not a usable audio/video media file: {media.name}"
+        )
+
+    subs = [p for p in root.iterdir() if p.is_file() and p.suffix.lower() in SUB_EXTS]
+    english = [p for p in subs if p.stem.strip().lower() == "english"]
+    if len(english) != 1:
+        raise DeckError("Expected exactly 1 English subtitle file named 'English.<ext>'")
+    english_sub = english[0]
+
+    # Ignore helper clean subtitle files when identifying the main foreign subtitle.
+    foreign_candidates = [
+        p for p in subs
+        if p != english_sub and not p.stem.strip().lower().endswith("-clean")
+    ]
+
+    if len(foreign_candidates) != 1:
+        raise DeckError(
+            "Expected exactly 1 main foreign subtitle file besides English "
+            "(excluding helper files like '-clean'). "
+            "Name it with its language, e.g. 'Spanish.srt' or 'Japanese.ass'."
+        )
+
+    foreign_sub = foreign_candidates[0]
+    language_name = foreign_sub.stem.strip()
+    return media, english_sub, foreign_sub, language_name
+
+
+def find_clean_tts_subtitle_path(foreign_sub_path: Path) -> Optional[Path]:
+    """
+    If the foreign subtitle is something like:
+      Italian.srt
+    and a matching clean file exists:
+      Italian-clean.srt
+    return the clean file path.
+
+    Otherwise return None.
+
+    We only look for the clean .srt version, because the requested behavior
+    is specifically "[FOREIGN]-clean.srt version of [FOREIGN].srt".
+    """
+    clean_candidate = foreign_sub_path.with_name(f"{foreign_sub_path.stem}-clean.srt")
+    if clean_candidate.is_file():
+        return clean_candidate
+    return None
+
+
+def overlap_ms(a_start: int, a_end: int, b_start: int, b_end: int) -> int:
+    return max(0, min(a_end, b_end) - max(a_start, b_start))
+
+
+def exact_time_match(a: SubtitleLine, b: SubtitleLine) -> bool:
+    return a.start_ms == b.start_ms and a.end_ms == b.end_ms
+
+
+def near_time_match(a: SubtitleLine, b: SubtitleLine, tolerance_ms: int = 120) -> bool:
+    return (
+        abs(a.start_ms - b.start_ms) <= tolerance_ms
+        and abs(a.end_ms - b.end_ms) <= tolerance_ms
+    )
+
+
+def time_distance(a: SubtitleLine, b: SubtitleLine) -> int:
+    return abs(a.start_ms - b.start_ms) + abs(a.end_ms - b.end_ms)
+
+
+def align_subtitles(
+    foreign_lines: List[SubtitleLine],
+    english_lines: List[SubtitleLine],
+) -> List[Tuple[SubtitleLine, List[SubtitleLine]]]:
+    aligned: List[Tuple[SubtitleLine, List[SubtitleLine]]] = []
+    if not foreign_lines:
+        return aligned
+
+    e_idx = 0
+    total_e = len(english_lines)
+
+    for f in foreign_lines:
+        # Move the English pointer forward past clearly earlier lines.
+        while e_idx < total_e and english_lines[e_idx].end_ms < f.start_ms - 2000:
+            e_idx += 1
+
+        nearby = english_lines[max(0, e_idx - 3): min(total_e, e_idx + 6)]
+
+        # 1) Best case: exact same time interval -> strict 1-to-1 match.
+        exact_matches = [e for e in nearby if exact_time_match(f, e)]
+        if exact_matches:
+            aligned.append((f, [exact_matches[0]]))
+            continue
+
+        # 2) Small discrepancy fallback: allow only very close timing.
+        near_matches = [e for e in nearby if near_time_match(f, e, tolerance_ms=120)]
+        if near_matches:
+            best = min(near_matches, key=lambda e: time_distance(f, e))
+            aligned.append((f, [best]))
+            continue
+
+        # 3) Last resort: choose the single nearest English line.
+        search_pool = english_lines[max(0, e_idx - 5): min(total_e, e_idx + 8)] or english_lines
+        nearest = min(search_pool, key=lambda e: time_distance(f, e))
+        aligned.append((f, [nearest]))
+
+    return aligned
+
+
+def choose_tts_text_for_line(
+    foreign_line: SubtitleLine,
+    clean_lines: Optional[List[SubtitleLine]],
+) -> str:
+    """
+    Use the clean subtitle text for TTS when available.
+
+    Matching priority:
+    1. Exact same start/end
+    2. Very close start/end
+    3. Best overlap
+    4. Nearest timing
+    5. Fallback to the original foreign subtitle text
+    """
+    if not clean_lines:
+        return foreign_line.text_plain
+
+    # 1) Exact match
+    for line in clean_lines:
+        if exact_time_match(foreign_line, line):
+            return line.text_plain or foreign_line.text_plain
+
+    # 2) Near match
+    near_matches = [line for line in clean_lines if near_time_match(foreign_line, line, tolerance_ms=120)]
+    if near_matches:
+        best = min(near_matches, key=lambda line: time_distance(foreign_line, line))
+        return best.text_plain or foreign_line.text_plain
+
+    # 3) Best overlap
+    overlapping = [
+        (overlap_ms(foreign_line.start_ms, foreign_line.end_ms, line.start_ms, line.end_ms), line)
+        for line in clean_lines
+    ]
+    overlapping = [(ov, line) for ov, line in overlapping if ov > 0]
+    if overlapping:
+        best_overlap, best_line = max(overlapping, key=lambda item: (item[0], -time_distance(foreign_line, item[1])))
+        if best_overlap > 0:
+            return best_line.text_plain or foreign_line.text_plain
+
+    # 4) Nearest timing
+    best = min(clean_lines, key=lambda line: time_distance(foreign_line, line))
+    return best.text_plain or foreign_line.text_plain
+
+
+def midpoint_ms(start_ms: int, end_ms: int) -> int:
+    if end_ms <= start_ms:
+        return start_ms
+    return start_ms + (end_ms - start_ms) // 2
+
+
+def ensure_tool(name: str) -> None:
+    if shutil.which(name) is None:
+        raise DeckError(f"Required tool not found on PATH: {name}")
+
+
+def probe_video_duration_ms(video_path: Path) -> Optional[int]:
+    if shutil.which("ffprobe") is None:
+        return None
+    proc = run(
+        [
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(video_path),
+        ],
+        capture_output=True,
+    )
+    raw = (proc.stdout or "").strip()
+    try:
+        return max(0, int(float(raw) * 1000))
+    except (TypeError, ValueError):
+        return None
+
+
+def clamp_thumbnail_time_ms(at_ms: int, video_duration_ms: Optional[int]) -> int:
+    if video_duration_ms is None:
+        return max(0, at_ms)
+    return max(0, min(at_ms, max(0, video_duration_ms - 100)))
+
+
+def ffmpeg_thumbnail(media_path: Path, output_path: Path, at_ms: int, width: int) -> bool:
+    if not media_has_video(media_path):
+        return False
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        ms_to_ffmpeg_time(at_ms),
+        "-i",
+        str(media_path),
+        "-frames:v",
+        "1",
+        "-update",
+        "1",
+        "-vf",
+        f"scale='min({width},iw)':-2,format=yuvj420p",
+        "-q:v",
+        "2",
+        str(output_path),
+    ]
+    run(cmd)
+    return output_path.exists() and output_path.stat().st_size > 0
+
+
+def ffmpeg_clip(
+    media_path: Path,
+    output_path: Path,
+    start_ms: int,
+    end_ms: int,
+    height: int,
+    crf: int,
+) -> None:
+    duration_ms = max(250, end_ms - start_ms)
+
+    if media_has_video(media_path):
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", ms_to_ffmpeg_time(start_ms),
+            "-t", ms_to_ffmpeg_time(duration_ms),
+            "-i", str(media_path),
+            "-vf", f"scale=-2:{height}",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", str(crf),
+            "-c:a", "aac",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+    else:
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", ms_to_ffmpeg_time(start_ms),
+            "-t", ms_to_ffmpeg_time(duration_ms),
+            "-i", str(media_path),
+            "-vn",
+            "-c:a", "libmp3lame",
+            "-q:a", "2",
+            str(output_path),
+        ]
+
+    run(cmd)
+
+
+def transcode_audio_to_mp3(input_audio: Path, output_audio: Path) -> None:
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(input_audio),
+        "-vn",
+        "-codec:a", "libmp3lame",
+        "-q:a", "2",
+        str(output_audio),
+    ]
+    run(cmd)
+
+
+def make_part_label(part_number: int) -> str:
+    if part_number < 10:
+        return f"Part 0{part_number}"
+    return f"Part {part_number}"
+
+
+def make_directional_deck_name(
+    parent_deck_name: str,
+    *,
+    part_number: int,
+    split_enabled: bool,
+    foreign_language_code: Optional[str],
+    reverse: bool,
+) -> str:
+    foreign_code = (foreign_language_code or "FL").upper()
+
+    if reverse:
+        direction = f"{foreign_code} \u2192 EN"
+    else:
+        direction = f"EN \u2192 {foreign_code}"
+
+    if split_enabled:
+        return f"{parent_deck_name}::{make_part_label(part_number)} {direction}"
+
+    return f"{parent_deck_name}::{direction}"
+
+
+def split_foreign_text_for_reverse(text: str) -> Tuple[str, str]:
+    lines = [
+        line.strip()
+        for line in text.replace("\\N", "\n").replace("\\n", "\n").splitlines()
+        if line.strip()
+    ]
+
+    if not lines:
+        return "", ""
+
+    if len(lines) == 1:
+        return lines[0], ""
+
+    kept_text = "\n".join(lines[:-1]).strip()
+    removed_last_line = lines[-1]
+    return kept_text, removed_last_line
+
+
+def compute_part_number(
+    card_index_zero_based: int,
+    clip_start_ms: int,
+    split_every_n_cards: int,
+    split_every_minutes: float,
+) -> int:
+    if split_every_n_cards:
+        return (card_index_zero_based // split_every_n_cards) + 1
+
+    if split_every_minutes:
+        window_ms = int(split_every_minutes * 60 * 1000)
+        return (clip_start_ms // window_ms) + 1
+
+    return 1
+
+
+def stable_deck_id(deck_name: str, tag: str) -> int:
+    return stable_int(f"deck::{deck_name}::{tag}")
+
+
+def build_tts_backend(args: argparse.Namespace) -> Optional[TTSBackend]:
+    if args.tts_engine == "none":
+        return None
+
+    say_backend = MacOSSayTTS(preferred_voice=args.say_voice) if sys.platform == "darwin" else None
+    sherpa_backend = None
+
+    if args.tts_engine in {"auto", "sherpa"} and args.sherpa_model_dir:
+        sherpa_backend = SherpaOnnxTTS(
+            model_dir=Path(args.sherpa_model_dir),
+            tokens_file=Path(args.sherpa_tokens) if args.sherpa_tokens else None,
+            data_dir=Path(args.sherpa_data_dir) if args.sherpa_data_dir else None,
+            dict_dir=Path(args.sherpa_dict_dir) if args.sherpa_dict_dir else None,
+            rule_fsts=Path(args.sherpa_rule_fsts) if args.sherpa_rule_fsts else None,
+            rule_fars=Path(args.sherpa_rule_fars) if args.sherpa_rule_fars else None,
+        )
+
+    if args.tts_engine == "say":
+        return say_backend
+    if args.tts_engine == "sherpa":
+        return sherpa_backend
+    return AutoTTS(sherpa=sherpa_backend, say_backend=say_backend)
+
+
+def create_note_model(model_id: int) -> genanki.Model:
+    return genanki.Model(
+        model_id,
+        "Video Dialogue Card",
+        fields=[
+            {"name": "FrontText"},
+            {"name": "BackText"},
+            {"name": "RemovedLastLine"},
+            {"name": "FrontTextClass"},
+            {"name": "BackTextClass"},
+            {"name": "FrontVisual"},
+            {"name": "FrontAudio"},
+            {"name": "BackAudio"},
+            {"name": "SortKey"},
+        ],
+        templates=[
+            {
+                "name": "Card 1",
+                "qfmt": """
+{{#FrontVisual}}<div class=\"frame\">{{FrontVisual}}</div>{{/FrontVisual}}
+<div class="line front-text {{FrontTextClass}}">{{FrontText}}</div>
+{{#FrontAudio}}<div class=\"media\">{{FrontAudio}}</div>{{/FrontAudio}}
+""",
+                "afmt": """
+{{FrontSide}}
+<hr id=answer>
+{{#RemovedLastLine}}<div class="line"><span class="subtitle-bottom-line">{{RemovedLastLine}}</span></div>{{/RemovedLastLine}}
+<div class="line back-text {{BackTextClass}}">{{BackText}}</div>
+{{#BackAudio}}<div class=\"media\">{{BackAudio}}</div>{{/BackAudio}}
+""",
+            }
+        ],
+        css="""
+.card {
+  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+  font-size: 22px;
+  text-align: center;
+  color: #111;
+  background: white;
+}
+.frame img {
+  max-width: 95%;
+  height: auto;
+  border-radius: 8px;
+}
+.line {
+  margin-top: 16px;
+  line-height: 1.45;
+}
+.front-text.english-like {
+  font-size: 1.05em;
+}
+
+.front-text.foreign-like {
+  font-size: 1.2em;
+  font-weight: 600;
+}
+
+.back-text.english-like {
+  font-size: 1.05em;
+}
+
+.back-text.foreign-like {
+  font-size: 1.2em;
+  font-weight: 600;
+}
+.media {
+  margin-top: 14px;
+}
+.subtitle-bottom-line {
+  font-size: 0.72em;
+}
+#answer {
+  margin-top: 18px;
+  margin-bottom: 18px;
+}
+""",
+        sort_field_index=5,
+    )
+
+
+def note_for_direction(
+    *,
+    model,
+    card: CardItem,
+    tag: str,
+    source_language: str,
+) -> genanki.Note:
+    clip_tag = f'[sound:{card.media_name}]' if card.media_name else ""
+    tts_tag = f'[sound:{card.tts_name}]' if card.tts_name else ""
+    thumb_tag = f'<img src="{html.escape(card.thumbnail_name)}">' if card.thumbnail_name else ""
+
+    if card.is_reverse:
+        front_foreign, removed_last_line = split_foreign_text_for_reverse(card.foreign_text)
+        if not front_foreign:
+            front_foreign = card.foreign_text.strip()
+
+        if source_language == "english":
+            # Reverse English source:
+            # Front = foreign subtitles + TTS
+            # Back = video clip + English subtitles
+            front_text = foreign_html_text(front_foreign)
+            back_text = html_text(card.english_text)
+            front_visual = ""
+            front_audio = tts_tag
+            back_audio = clip_tag
+        else:
+            # Reverse non-English source:
+            # Front = foreign subtitles (without last line if multiline) + video clip
+            # Back = English subtitles
+            front_text = foreign_html_text(front_foreign)
+            back_text = html_text(card.english_text)
+            front_visual = ""
+            front_audio = clip_tag
+            back_audio = ""
+
+        guid = genanki.guid_for(
+            tag, "reverse", card.idx, card.start_ms, card.end_ms, card.foreign_text
+        )
+        return genanki.Note(
+            model=model,
+            fields=[
+                front_text,
+                back_text,
+                html.escape(removed_last_line, quote=False),
+                "foreign-like",
+                "english-like",
+                front_visual,
+                front_audio,
+                back_audio,
+                f"{card.idx:08d}",
+            ],
+            tags=[tag, "reverse"],
+            guid=guid,
+        )
+
+    if source_language == "english":
+        # Normal English source:
+        # Front = video clip + English subtitles
+        # Back = Foreign subtitles + TTS
+        front_text = html_text(card.english_text)
+        back_text = foreign_html_text(card.foreign_text)
+        front_visual = ""
+        front_audio = clip_tag
+        back_audio = tts_tag
+    else:
+        # Normal non-English source:
+        # Front = Thumbnail + English subtitles
+        # Back = Foreign subtitles + clip
+        front_text = html_text(card.english_text)
+        back_text = foreign_html_text(card.foreign_text)
+        front_visual = thumb_tag
+        front_audio = ""
+        back_audio = clip_tag
+
+    guid = genanki.guid_for(
+        tag, "normal", card.idx, card.start_ms, card.end_ms, card.foreign_text
+    )
+    return genanki.Note(
+        model=model,
+        fields = [
+            front_text,
+            back_text,
+            "",
+            "english-like",
+            "foreign-like",
+            front_visual,
+            front_audio,
+            back_audio,
+            f"{card.idx:08d}",
+        ],
+        tags=[tag, "normal"],
+        guid=guid,
+    )
+
+
+def build_deck(
+    output_apkg: Path,
+    deck_name: str,
+    media_files: List[Path],
+    cards: List[CardItem],
+    tag: str,
+    source_language: str,
+) -> None:
+    model_id = stable_int(f"model::{deck_name}::{tag}")
+    model = create_note_model(model_id)
+
+    decks: Dict[str, genanki.Deck] = {}
+
+    for card in cards:
+        target_deck_name = card.deck_name or deck_name
+
+        if target_deck_name not in decks:
+            decks[target_deck_name] = genanki.Deck(
+                stable_deck_id(target_deck_name, tag),
+                target_deck_name,
+            )
+
+        note = note_for_direction(
+            model=model,
+            card=card,
+            tag=tag,
+            source_language=source_language,
+        )
+        decks[target_deck_name].add_note(note)
+
+    all_decks = list(decks.values())
+
+    if len(all_decks) == 1:
+        package = genanki.Package(all_decks[0])
+    else:
+        package = genanki.Package(all_decks)
+
+    package.media_files = [str(p) for p in media_files]
+    package.write_to_file(str(output_apkg))
+
+
+def infer_language_code(language_name: str) -> Optional[str]:
+    key = language_name.strip().lower()
+    return LANGUAGE_ALIASES.get(key)
+
+
+def make_cards(
+    aligned_pairs: List[Tuple[SubtitleLine, List[SubtitleLine]]],
+    *,
+    media_path: Path,
+    media_dir: Path,
+    thumbnail_width: int,
+    clip_height: int,
+    clip_crf: int,
+    source_language: str,
+    foreign_language_code: Optional[str],
+    video_duration_ms: Optional[int],
+    tts_backend: Optional[TTSBackend],
+    clean_tts_lines: Optional[List[SubtitleLine]],
+    split_every_n_cards: int,
+    split_every_minutes: float,
+    parent_deck_name: str,
+    no_reverse: bool,
+) -> Tuple[List[CardItem], List[Path], List[str]]:
+    cards: List[CardItem] = []
+    media_files: List[Path] = []
+    warnings: List[str] = []
+
+    for idx, (foreign_line, english_group) in enumerate(aligned_pairs):
+        english_text = "\n".join(e.text_plain for e in english_group).strip() or "[No English subtitle found]"
+        foreign_text = foreign_line.text_plain
+        part_number = compute_part_number(
+            card_index_zero_based=idx,
+            clip_start_ms=foreign_line.start_ms,
+            split_every_n_cards=split_every_n_cards,
+            split_every_minutes=split_every_minutes,
+        )
+
+        split_enabled = bool(split_every_n_cards or split_every_minutes)
+
+        normal_deck_name = make_directional_deck_name(
+            parent_deck_name,
+            part_number=part_number,
+            split_enabled=split_enabled,
+            foreign_language_code=foreign_language_code,
+            reverse=False,
+        )
+
+        reverse_deck_name = make_directional_deck_name(
+            parent_deck_name,
+            part_number=part_number,
+            split_enabled=split_enabled,
+            foreign_language_code=foreign_language_code,
+            reverse=True,
+        )
+
+        safe_prefix = f"card_{idx:05d}_{slugify(foreign_text[:32])}"
+        thumb_path = media_dir / f"{safe_prefix}.jpg"
+
+        input_has_video = media_has_video(media_path)
+        clip_ext = ".mp4" if input_has_video else ".mp3"
+        clip_path = media_dir / f"{safe_prefix}{clip_ext}"
+        tts_name = ""
+
+        thumbnail_name = ""
+        if input_has_video:
+            thumb_at_ms = clamp_thumbnail_time_ms(
+                midpoint_ms(foreign_line.start_ms, foreign_line.end_ms),
+                video_duration_ms,
+            )
+            thumb_created = ffmpeg_thumbnail(media_path, thumb_path, thumb_at_ms, thumbnail_width)
+            if thumb_created:
+                media_files.append(thumb_path)
+                thumbnail_name = thumb_path.name
+
+        clip_start_ms = max(0, foreign_line.start_ms)
+        requested_clip_end_ms = foreign_line.end_ms + 500
+
+        if video_duration_ms is not None:
+            clip_end_ms = min(requested_clip_end_ms, video_duration_ms)
+        else:
+            clip_end_ms = requested_clip_end_ms
+
+        if clip_end_ms <= clip_start_ms:
+            clip_end_ms = clip_start_ms + 250
+
+        ffmpeg_clip(media_path, clip_path, clip_start_ms, clip_end_ms, clip_height, clip_crf)
+
+        media_files.append(clip_path)
+
+        if source_language == "english":
+            if not foreign_language_code:
+                warnings.append(
+                    f"TTS skipped for card {idx}: could not infer language code from subtitle filename."
+                )
+            elif foreign_language_code not in SUPPORTED_LANGUAGES:
+                warnings.append(
+                    f"TTS skipped for card {idx}: language code '{foreign_language_code}' is not in the built-in voice map."
+                )
+            elif tts_backend is None:
+                warnings.append(f"TTS skipped for card {idx}: no TTS backend configured.")
+            else:
+                raw_tts = media_dir / f"{safe_prefix}.aiff"
+                mp3_tts = media_dir / f"{safe_prefix}.mp3"
+                tts_source_text = choose_tts_text_for_line(foreign_line, clean_tts_lines)
+                success = tts_backend.synthesize(tts_source_text, foreign_language_code, raw_tts)
+                if success:
+                    try:
+                        transcode_audio_to_mp3(raw_tts, mp3_tts)
+                        raw_tts.unlink(missing_ok=True)
+                        media_files.append(mp3_tts)
+                        tts_name = mp3_tts.name
+                    except subprocess.CalledProcessError:
+                        warnings.append(f"TTS generated but failed to transcode for card {idx}.")
+                else:
+                    warnings.append(
+                        f"TTS skipped for card {idx}: local engine could not synthesize language '{foreign_language_code}'."
+                    )
+
+        cards.append(
+            CardItem(
+                idx=idx,
+                start_ms=foreign_line.start_ms,
+                end_ms=foreign_line.end_ms,
+                english_text=english_text,
+                foreign_text=foreign_text,
+                thumbnail_name=thumbnail_name,
+                media_name=clip_path.name,
+                tts_name=tts_name,
+                deck_name=normal_deck_name,
+                is_reverse=False,
+            )
+        )
+
+        if not no_reverse:
+            cards.append(
+                CardItem(
+                    idx=idx,
+                    start_ms=foreign_line.start_ms,
+                    end_ms=foreign_line.end_ms,
+                    english_text=english_text,
+                    foreign_text=foreign_text,
+                    thumbnail_name=thumbnail_name,
+                    media_name=clip_path.name,
+                    tts_name=tts_name,
+                    deck_name=reverse_deck_name,
+                    is_reverse=True,
+                )
+            )
+
+    return cards, media_files, warnings
+
+
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate an Anki .apkg deck from a media file and two subtitle files.")
+    parser.add_argument("directory", type=Path, help="Folder containing the video and subtitles")
+    parser.add_argument("--deck-name", required=True, help="Name of the Anki deck to create")
+    parser.add_argument("--output", type=Path, help="Output .apkg path (default: <deck-name>.apkg in the input directory)")
+    parser.add_argument(
+        "--source-language",
+        choices=["foreign", "english"],
+        default="foreign",
+        help="Whether the source video's spoken language is foreign (default) or English",
+    )
+    parser.add_argument("--thumbnail-width", type=int, default=480)
+    parser.add_argument("--clip-height", type=int, default=360)
+    parser.add_argument("--clip-crf", type=int, default=24)
+    parser.add_argument(
+        "--tts-engine",
+        choices=["auto", "say", "sherpa", "none"],
+        default="auto",
+        help="Local TTS backend for English-source mode",
+    )
+    parser.add_argument("--say-voice", help="Override macOS 'say' voice name")
+    parser.add_argument("--sherpa-model-dir", help="Directory containing a local sherpa-onnx TTS model")
+    parser.add_argument("--sherpa-tokens", help="Path to sherpa-onnx tokens.txt")
+    parser.add_argument("--sherpa-data-dir", help="Optional sherpa-onnx data dir")
+    parser.add_argument("--sherpa-dict-dir", help="Optional sherpa-onnx dict dir")
+    parser.add_argument("--sherpa-rule-fsts", help="Optional sherpa-onnx rule_fsts path")
+    parser.add_argument("--sherpa-rule-fars", help="Optional sherpa-onnx rule_fars path")
+    parser.add_argument("--tag", default="video-dialogue")
+    parser.add_argument(
+        "--split-every-n-cards",
+        type=int,
+        default=0,
+        help="If set to a positive integer, split the deck into subdecks of this many cards each.",
+    )
+    parser.add_argument(
+        "--split-every-minutes",
+        type=float,
+        default=0,
+        help="If set to a positive number, split the deck into subdecks by video time window in minutes (for example, 15 = one subdeck per 15 minutes).",
+    )
+    parser.add_argument(
+        "--no-reverse",
+        action="store_true",
+        help="Only generate normal decks/cards and skip reverse decks.",
+    )
+
+    args = parser.parse_args(argv)
+    if args.split_every_n_cards and args.split_every_n_cards < 1:
+        parser.error("--split-every-n-cards must be greater than 0.")
+    if args.split_every_minutes and args.split_every_minutes <= 0:
+        parser.error("--split-every-minutes must be greater than 0.")
+    if args.split_every_n_cards and args.split_every_minutes:
+        parser.error("Use only one split mode: --split-every-n-cards or --split-every-minutes.")
+    return args
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = parse_args(argv)
+    root = args.directory.expanduser().resolve()
+    if not root.is_dir():
+        raise DeckError(f"Not a directory: {root}")
+
+    ensure_tool("ffmpeg")
+    ensure_tool("ffprobe")
+
+    media_path, english_sub_path, foreign_sub_path, foreign_language_name = find_input_files(root)
+    foreign_language_code = infer_language_code(foreign_language_name)
+    fps = probe_video_fps(media_path) if media_has_video(media_path) else None
+
+    english_lines = load_subtitles(english_sub_path, fps=fps)
+    foreign_lines = load_subtitles(foreign_sub_path, fps=fps)
+
+    clean_tts_sub_path = find_clean_tts_subtitle_path(foreign_sub_path)
+    clean_tts_lines: Optional[List[SubtitleLine]] = None
+    if clean_tts_sub_path is not None:
+        clean_tts_lines = load_subtitles(clean_tts_sub_path, fps=fps)
+
+    video_duration_ms = probe_video_duration_ms(media_path) if media_has_video(media_path) else None
+
+    if not english_lines:
+        raise DeckError(f"No usable dialogue lines found in {english_sub_path.name}")
+    if not foreign_lines:
+        raise DeckError(f"No usable dialogue lines found in {foreign_sub_path.name}")
+
+    aligned_pairs = align_subtitles(foreign_lines, english_lines)
+    if not aligned_pairs:
+        raise DeckError("No subtitle pairs could be aligned")
+
+    tts_backend = build_tts_backend(args)
+    output_apkg = args.output or (root / f"{slugify(args.deck_name)}.apkg")
+
+    with tempfile.TemporaryDirectory(prefix="anki_video_deck_") as tmpdir:
+        media_dir = Path(tmpdir)
+        cards, media_files, warnings = make_cards(
+            aligned_pairs,
+            media_path=media_path,
+            media_dir=media_dir,
+            thumbnail_width=args.thumbnail_width,
+            clip_height=args.clip_height,
+            clip_crf=args.clip_crf,
+            source_language=args.source_language,
+            foreign_language_code=foreign_language_code,
+            tts_backend=tts_backend,
+            clean_tts_lines=clean_tts_lines,
+            video_duration_ms=video_duration_ms,
+            split_every_n_cards=args.split_every_n_cards,
+            split_every_minutes=args.split_every_minutes,
+            parent_deck_name=args.deck_name,
+            no_reverse=args.no_reverse,
+        )
+
+        build_deck(
+            output_apkg,
+            args.deck_name,
+            media_files,
+            cards,
+            args.tag,
+            args.source_language,
+        )
+
+    print(f"Created deck: {output_apkg}")
+    print(f"Aligned pairs: {len(aligned_pairs)}")
+    print(f"Cards: {len(cards)}")
+    has_video, has_audio = probe_stream_types(media_path)
+    media_kind = "video" if has_video else "audio"
+    print(f"Media ({media_kind}): {media_path.name}")
+    print(f"English subtitles: {english_sub_path.name}")
+    print(f"Foreign subtitles: {foreign_sub_path.name}")
+    if clean_tts_sub_path is not None:
+        print(f"TTS subtitles: {clean_tts_sub_path.name}")
+    else:
+        print(f"TTS subtitles: {foreign_sub_path.name}")
+    if foreign_language_code:
+        print(f"Detected foreign language: {foreign_language_name} ({foreign_language_code})")
+    else:
+        print(f"Detected foreign language: {foreign_language_name} (code unknown)")
+
+    if warnings:
+        print("\nWarnings:")
+        for w in warnings[:50]:
+            print(f"- {w}")
+        if len(warnings) > 50:
+            print(f"- ... and {len(warnings) - 50} more")
+
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except DeckError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(2)
