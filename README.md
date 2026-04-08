@@ -1,5 +1,8 @@
 # Immerse
 A toolkit for turning any media resource into a language-learning Anki deck!
+- Compatible with videos (recordings, clips, TV, movies), audio (recordings, podcasts, music), and text (books, articles, pdfs, plaintext)
+- Decks designed to promote reading/writing and listening/speaking
+- Generates both EN → Foreign and Foreign → EN
 
 Developed by Armin Salehipour for WVU Medical Language Learners.
 
