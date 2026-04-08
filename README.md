@@ -3,7 +3,7 @@ A toolkit for turning any media resource into a language-learning Anki deck!
 
 Developed by Armin Salehipour for WVU Medical Language Learners.
 
-![[Logo.png]]
+![[./Logo.png]]
 
 **TODO:**
 - [ ] Package for easy layman use
