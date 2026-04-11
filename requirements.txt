@@ -1,0 +1,11 @@
+cmake
+genanki
+pysubs2
+mlx-whisper
+faster-whisper
+demucs-mlx
+sherpa-onnx-core
+sherpa_onnx
+torch
+torchaudio
+torchvision
