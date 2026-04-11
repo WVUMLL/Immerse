@@ -10,7 +10,6 @@ Developed by Armin Salehipour for WVU Medical Language Learners.
 
 **TODO:**
 - [ ] Package for easy layman use
-	- [ ] Merge programs into one environment → Updated Requirements.txt → Add to Git with full installation instructions
 	- [ ] Meta-program that chains Subtitle Generation → Claude API Handling → Anki Generation
 	- [ ] UI
 	- [ ] Package into binary
