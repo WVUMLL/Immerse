@@ -15,6 +15,57 @@ Developed by Armin Salehipour for WVU Medical Language Learners.
 	- [ ] UI
 	- [ ] Package into binary
 
+# How to Install
+
+⚠️ This program is intended for WVU HSC students and assumes your device is a MacBook Air ⚠️
+
+**0a - Download Files**
+
+Click the green button on this page that says "Code" and select "Download ZIP".
+Unzip "Immerse-main.zip" and move the "Immerse-main" folder wherever you want to keep it.
+
+From now on, the instructions will refer to this folder with the placeholder `/path/to/Immerse-main`.
+Files inside that folder follow that path name (e.g., `/path/to/Immerse-main/requirements.txt`).
+Whenever you see these placeholders, replace them with the actual path to the folder/file.
+
+TIP: You can just drag the folder/file into the Terminal without needing to type it out.
+
+**0b - Open the "Terminal" app (already installed on your Mac)**
+
+**1a - Install Python3**
+
+**1b - Install Homebrew**
+
+**2 - Install required system tools (if necessary)**
+```
+xcode-select --install
+sudo xcodebuild -license accept
+brew install ffmpeg
+```
+
+**3 - Recommended, but optional: Create an environment**
+```
+python3 -m venv .anki_immersion_env
+```
+This creates a self-contained environment that doesn't interfere with other python projects.
+
+**4a - If you created an environment, this command opens that environment.**
+**If you didn't create an environment, skip to 3b.**
+```
+source .anki_immersion_env/bin/activate
+```
+You'll want to open this environment whenever you want to use the program.
+
+**4b - Install python dependencies**
+```
+pip install -r /path/to/Immerse-main/requirements.txt
+```
+
+**4c - To complete song support**
+```
+python -m pip install -U "demucs-mlx[convert]"
+```
+
 # How to Use
 
 ## Program Workflow
@@ -33,36 +84,26 @@ Two Text Files → [LLM] Map.json → ...
 
 ## Subtitle Generation
 
-### Installation
-
-#### HTDemucs
-```
-python3 -m pip install -U pip setuptools wheel
-python3 -m pip install -U torch torchvision torchaudio
-python3 -m pip install -U demucs
-python -m pip install -U demucs-mlx
-python -m pip install -U "demucs-mlx[convert]"
-```
+⚠️ This is the most time-consuming step! If you don't want to wait hours to process longer media (shows, movies, etc.), we recommend splitting them into smaller clips and making decks in parts. ⚠️
 
 ### Basic usage
 
-#### 1a. Set environment
+#### 1. If you made an environment, open it. Otherwise, skip to step 2.
 ```
-whisperxenv
+source .anki_immersion_env/bin/activate
 ```
 
 #### 2. Execution
 ```
-python /path/to/autosrt.py [MEDIA_PATH] --model mlx-community/whisper-large-v3-mlx
+python /path/to/Immerse-main/autosrt.py [PUT_MEDIA_PATH_HERE] --model mlx-community/whisper-large-v3-mlx
 ```
 
 ##### Optional Arguments
 ```
-# Isolate lyrics
+# Add this to the end if you're doing song lyrics
 --song
 ```
 
----
 ## LLM Prompts (with Claude)
 
 ### Map.json Construction
@@ -151,36 +192,22 @@ Filter the provided subtitles file to only retain dialgoue that could be heard o
 Generate subtitles in .srt format using the provided lyrics that are in .lrc format. For each lyric, convert its timestamp to the equivalent starting timestamp in .srt format and set the ending .srt timestamp for that lyric to the timestamp of the next lyric. If the final lyrics are not followed by another timestamp, set its .srt ending timestamp to "99:99:99,000". Be sure to retain the the original, unchanged, lryic content in the subtitles.
 ```
 
----
 ## Anki Generation
 
 **TODO:**
 - [ ] Map file support
 	- [ ] Maybe include screenshot generated from text to show preceding and following sentence for context.
 
-### Installation
-
-```
-python3 -m venv .anki_immersion_env
-source .anki_immersion_env/bin/activate
-pip install -r /path/to/requirements.txt
-
-# required system tools (if necessary)
-xcode-select --install
-sudo xcodebuild -license accept
-brew install ffmpeg
-```
-
 ### Basic usage
 
-#### 1. Set environment
+#### 1. If you made an environment, open it. Otherwise, skip to step 2.
 ```
-source ~/.anki_immersion_env/bin/activate
+source .anki_immersion_env/bin/activate
 ```
 
 #### 2. Execution
 ```
-python /path/to/anki_media_deck.py [FOLDER_PATH] --deck-name "[NAME]"
+python /path/to/Immerse-main/anki_media_deck.py [PUT_FOLDER_PATH_HERE] --deck-name "[DECK_NAME_HERE]"
 ```
 
 ##### Optional Arguments
@@ -201,12 +228,8 @@ python /path/to/anki_media_deck.py [FOLDER_PATH] --deck-name "[NAME]"
 ### Optional sherpa-onnx usage
 
 ```
-# Installation
-python -m pip install --upgrade pip setuptools wheel
-pip install cmake
-pip install sherpa-onnx
-
 # Usage Example
-python /path/to/anki_media_deck.py [FOLDER_PATH] --deck-name "[NAME]" --source-video-language english --tts-engine sherpa --sherpa-model-dir [MODEL_PATH] --split-every-n-cards 10
+python /path/to/Immerse-main/anki_media_deck.py [FOLDER_PATH] --deck-name "[DECK_NAME]" --source-video-language english --tts-engine sherpa --sherpa-model-dir [MODEL_PATH] --split-every-n-cards 10
 ```
-You will need to manually download the model for your target language and send it
+You will need to manually download the model for your target language and send it.
+If this is confusing or overwhelming, just ignore it. It's not necessary.
