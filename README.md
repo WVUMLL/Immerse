@@ -28,13 +28,57 @@ From now on, the instructions will refer to this folder with the placeholder `/p
 Files inside that folder follow that path name (e.g., `/path/to/Immerse-main/requirements.txt`).
 Whenever you see these placeholders, replace them with the actual path to the folder/file.
 
-TIP: You can just drag the folder/file into the Terminal without needing to type it out.
+TIP: You can drag a folder or file into Terminal to automatically paste its full path.
 
 **0b - Open the "Terminal" app (already installed on your Mac)**
 
-**1a - Install Python3**
+**1a - Install Homebrew**
 
-**1b - Install Homebrew**
+Copy and paste this into Terminal
+```
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+Press Enter to run the command.
+
+Follow on-screen instructions.
+You may be asked to enter your Mac password. When you type it, you won't see any visual feedback. Just press enter again after you're done typing it.
+
+At the end, Homebrew will show a command like this. Copy and run it
+```
+echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
+eval "$(/opt/homebrew/bin/brew shellenv)"
+```
+This step allows your system to recognize Homebrew commands.
+
+Lastly, verify it installed with this
+```
+brew --version
+```
+It should show you the Homebrew version you have installed
+
+**1b - Install Python3**
+```
+brew install python
+```
+
+Verify your python version
+```
+python3 --version
+```
+
+Verify your pip version
+```
+pip3 --version
+```
+
+Optional: This lets you type `python` and `pip` (like in our instructions below) instead of `python3` and `pip3`.
+```
+echo 'alias python=python3' >> ~/.zshrc
+echo 'alias pip=pip3' >> ~/.zshrc
+source ~/.zshrc
+```
+If you choose not to, or this step is giving you problems, just enter `python3` whenever our instructions say `python` and `pip3` whenever our instructions say `pip`.
+If anything breaks later, you can remove these lines from ~/.zshrc.
 
 **2 - Install required system tools (if necessary)**
 ```
@@ -42,19 +86,26 @@ xcode-select --install
 sudo xcodebuild -license accept
 brew install ffmpeg
 ```
+If a popup appears, click "Install".
 
 **3 - Recommended, but optional: Create an environment**
 ```
-python3 -m venv .anki_immersion_env
+python -m venv .anki_immersion_env
 ```
 This creates a self-contained environment that doesn't interfere with other python projects.
 
-**4a - If you created an environment, this command opens that environment.**
-**If you didn't create an environment, skip to 3b.**
+**4a - If you created an environment, this command activates that environment.**
+**If you didn't create an environment, skip to 4b.**
 ```
 source .anki_immersion_env/bin/activate
 ```
-You'll want to open this environment whenever you want to use the program.
+This activates the environment. You should see its name appear at the start of your Terminal line.
+You should now see something like:
+```
+(.anki_immersion_env) your-name@MacBook-Air ...
+```
+
+If you close Terminal later, you must run this again before using the program.
 
 **4b - Install python dependencies**
 ```
@@ -88,7 +139,7 @@ Two Text Files → [LLM] Map.json → ...
 
 ### Basic usage
 
-#### 1. If you made an environment, open it. Otherwise, skip to step 2.
+#### 1. If you made an environment, activate it. Otherwise, skip to step 2.
 ```
 source .anki_immersion_env/bin/activate
 ```
@@ -200,7 +251,7 @@ Generate subtitles in .srt format using the provided lyrics that are in .lrc for
 
 ### Basic usage
 
-#### 1. If you made an environment, open it. Otherwise, skip to step 2.
+#### 1. If you made an environment, activate it. Otherwise, skip to step 2.
 ```
 source .anki_immersion_env/bin/activate
 ```
