@@ -9,10 +9,14 @@ Developed by Armin Salehipour for WVU Medical Language Learners.
 <img src="Logo.png" alt="drawing" width="250"/>
 
 **TODO:**
+- [ ] Add demo images to Github (video clip, song, text)
 - [ ] Package for easy layman use
 	- [ ] Meta-program that chains Subtitle Generation → Claude API Handling → Anki Generation
 	- [ ] UI
 	- [ ] Package into binary
+- [ ] Vocab mode: Cards for individual lexemes (words/phrases)
+	- [ ] Option: Top X number of words
+	- [ ] Option: Filter words based on most default most common vocab list, other text source, or both
 
 # How to Install
 
@@ -274,7 +278,11 @@ python /path/to/Immerse-main/anki_media_deck.py [PUT_FOLDER_PATH_HERE] --deck-na
 --no-reverse
 ```
 
-### Optional sherpa-onnx usage
+### Optional sherpa-onnx usage (Necessary for Persian (Farsi), Arabic, Tagalog, and Indonesian Text-to-Speech)
+
+**TODO:**
+- [ ] Language model installation instructions
+- [ ] Links for Persian (Farsi), Arabic, Tagalog, and Indonesian models
 
 ```
 # Usage Example
