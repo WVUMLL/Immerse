@@ -134,11 +134,17 @@ class CardItem:
     end_ms: int
     english_text: str
     foreign_text: str
-    thumbnail_name: str
-    media_name: str
+    clean_foreign_text: str = ""
+    foreign_added_text: str = ""
+    foreign_transliteration: str = ""
+    foreign_ipa: str = ""
+    foreign_gloss: str = ""
+    thumbnail_name: str = ""
+    media_name: str = ""
     tts_name: str = ""
     deck_name: str = ""
     is_reverse: bool = False
+    is_map_card: bool = False
 
 
 class DeckError(RuntimeError):
@@ -264,28 +270,36 @@ def stable_int(seed: str, digits: int = 10) -> int:
     return int(digest[:digits], 16)
 
 
-def foreign_html_text(text: str) -> str:
-    text = text.replace("\\N", "\n").replace("\\n", "\n")
-    text = text.strip()
+def foreign_html_text(text: str, added_text: str = "") -> str:
+    text = text.replace("\\N", "\n").replace("\\n", "\n").strip()
+    added_text = added_text.replace("\\N", "\n").replace("\\n", "\n").strip()
 
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if not lines:
+    full_lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not full_lines:
         return ""
 
-    escaped_lines = [html.escape(line, quote=False) for line in lines]
+    if not added_text:
+        escaped_lines = [html.escape(line, quote=False) for line in full_lines]
+        return "<br>".join(escaped_lines)
 
-    if len(escaped_lines) == 1:
-        return escaped_lines[0]
+    added_lines = [line.strip() for line in added_text.splitlines() if line.strip()]
+    if not added_lines:
+        escaped_lines = [html.escape(line, quote=False) for line in full_lines]
+        return "<br>".join(escaped_lines)
 
-    normal_lines = escaped_lines[:-1]
-    last_line = escaped_lines[-1]
+    if len(added_lines) <= len(full_lines) and full_lines[-len(added_lines):] == added_lines:
+        normal_lines = full_lines[:-len(added_lines)]
+        normal_html = "<br>".join(html.escape(line, quote=False) for line in normal_lines)
+        added_html = "<br>".join(html.escape(line, quote=False) for line in added_lines)
 
-    parts = []
-    if normal_lines:
-        parts.append("<br>".join(normal_lines))
-    parts.append(f'<span class="subtitle-bottom-line">{last_line}</span>')
+        parts = []
+        if normal_html:
+            parts.append(normal_html)
+        parts.append(f'<span class="subtitle-bottom-line">{added_html}</span>')
+        return "<br>".join(parts)
 
-    return "<br>".join(parts)
+    escaped_lines = [html.escape(line, quote=False) for line in full_lines]
+    return "<br>".join(escaped_lines)
 
 
 def html_text(text: str) -> str:
@@ -294,6 +308,151 @@ def html_text(text: str) -> str:
     text = html.escape(text, quote=False)
     text = re.sub(r"\s*\n\s*", "<br>", text)
     return text
+
+
+def small_text_html(text: str) -> str:
+    text = text.replace("\\N", "\n").replace("\\n", "\n").strip()
+    if not text:
+        return ""
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+
+    escaped = "<br>".join(html.escape(line, quote=False) for line in lines)
+    return f'<span class="subtitle-bottom-line">{escaped}</span>'
+
+
+def combine_main_and_small_text(main_text: str, *small_parts: str) -> str:
+    pieces: List[str] = []
+
+    main_html = html_text(main_text)
+    if main_html:
+        pieces.append(main_html)
+
+    for part in small_parts:
+        part_html = small_text_html(part)
+        if part_html:
+            pieces.append(part_html)
+
+    return "<br>".join(pieces)
+
+
+def find_map_json_path(root: Path) -> Optional[Path]:
+    for p in root.iterdir():
+        if p.is_file() and p.name.lower() == "map.json":
+            return p
+    return None
+
+
+def load_map_json(map_path: Path) -> dict:
+    try:
+        with map_path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception as exc:
+        raise DeckError(f"Could not read Map.json: {exc}")
+
+    if not isinstance(payload, dict):
+        raise DeckError("Map.json must contain a top-level JSON object.")
+
+    metadata = payload.get("metadata")
+    segments = payload.get("segments")
+
+    if not isinstance(metadata, dict):
+        raise DeckError("Map.json is missing a valid 'metadata' object.")
+    if not isinstance(segments, list):
+        raise DeckError("Map.json is missing a valid 'segments' list.")
+
+    return payload
+
+
+def determine_map_languages(payload: dict) -> Tuple[str, str]:
+    metadata = payload.get("metadata", {})
+    source_lang = infer_language_code(str(metadata.get("source_language", "")).strip())
+    target_lang = infer_language_code(str(metadata.get("target_language", "")).strip())
+
+    if not source_lang or not target_lang:
+        raise DeckError("Map.json metadata must include readable source_language and target_language values.")
+
+    if source_lang == "en" and target_lang != "en":
+        return "source", "target"
+
+    if target_lang == "en" and source_lang != "en":
+        return "target", "source"
+
+    raise DeckError(
+        "Map.json currently requires exactly one side to be English ('en') and the other side to be the foreign language."
+    )
+
+
+def build_map_aligned_pairs(
+    payload: dict,
+) -> Tuple[List[Tuple[SubtitleLine, List[SubtitleLine]]], Dict[int, dict], str]:
+    english_side, foreign_side = determine_map_languages(payload)
+    segments = payload.get("segments", [])
+
+    aligned_pairs: List[Tuple[SubtitleLine, List[SubtitleLine]]] = []
+    extras_by_index: Dict[int, dict] = {}
+
+    current_ms = 0
+
+    for idx, segment in enumerate(segments):
+        if not isinstance(segment, dict):
+            continue
+
+        source = segment.get("source") or {}
+        target = segment.get("target") or {}
+
+        if not isinstance(source, dict) or not isinstance(target, dict):
+            continue
+
+        source_text = clean_subtitle_text(str(source.get("text", "") or ""))
+        target_text = clean_subtitle_text(str(target.get("text", "") or ""))
+
+        if english_side == "source":
+            english_text = source_text
+            foreign_text = target_text
+            foreign_obj = target
+        else:
+            english_text = target_text
+            foreign_text = source_text
+            foreign_obj = source
+
+        if not english_text or not foreign_text:
+            continue
+
+        english_line = SubtitleLine(
+            start_ms=current_ms,
+            end_ms=current_ms + 1000,
+            text_raw=english_text,
+            text_plain=english_text,
+        )
+        foreign_line = SubtitleLine(
+            start_ms=current_ms,
+            end_ms=current_ms + 1000,
+            text_raw=foreign_text,
+            text_plain=foreign_text,
+        )
+
+        aligned_pairs.append((foreign_line, [english_line]))
+
+        extras_by_index[idx] = {
+            "transliteration": clean_subtitle_text(str(foreign_obj.get("transliteration", "") or "")),
+            "ipa": clean_subtitle_text(str(foreign_obj.get("ipa", "") or "")),
+            "gloss": clean_subtitle_text(str(foreign_obj.get("gloss", "") or "")),
+        }
+
+        current_ms += 1000
+
+    metadata = payload.get("metadata", {})
+    foreign_language_code = infer_language_code(
+        str(metadata.get("target_language" if english_side == "source" else "source_language", "")).strip()
+    )
+
+    if not aligned_pairs:
+        raise DeckError("Map.json did not contain any usable source/target text pairs.")
+
+    return aligned_pairs, extras_by_index, (foreign_language_code or "")
 
 
 ASS_TAG_RE = re.compile(r"\{[^{}]*\}")
@@ -434,7 +593,12 @@ def find_input_files(root: Path) -> Tuple[Path, Path, Path, str]:
             f"Input file is not a usable audio/video media file: {media.name}"
         )
 
-    subs = [p for p in root.iterdir() if p.is_file() and p.suffix.lower() in SUB_EXTS]
+    subs = [
+        p for p in root.iterdir()
+        if p.is_file()
+        and p.suffix.lower() in SUB_EXTS
+        and p.name.lower() != "map.json"
+    ]
     english = [p for p in subs if p.stem.strip().lower() == "english"]
     if len(english) != 1:
         raise DeckError("Expected exactly 1 English subtitle file named 'English.<ext>'")
@@ -579,6 +743,89 @@ def choose_tts_text_for_line(
     return best.text_plain or foreign_line.text_plain
 
 
+def choose_clean_text_for_line(
+    foreign_line: SubtitleLine,
+    clean_lines: Optional[List[SubtitleLine]],
+) -> str:
+    """
+    Return the matching clean subtitle text when available.
+    If no clean subtitle file exists, return an empty string.
+    """
+    if not clean_lines:
+        return ""
+
+    for line in clean_lines:
+        if exact_time_match(foreign_line, line):
+            return line.text_plain
+
+    near_matches = [line for line in clean_lines if near_time_match(foreign_line, line, tolerance_ms=120)]
+    if near_matches:
+        best = min(near_matches, key=lambda line: time_distance(foreign_line, line))
+        return best.text_plain
+
+    overlapping = [
+        (overlap_ms(foreign_line.start_ms, foreign_line.end_ms, line.start_ms, line.end_ms), line)
+        for line in clean_lines
+    ]
+    overlapping = [(ov, line) for ov, line in overlapping if ov > 0]
+    if overlapping:
+        _, best_line = max(overlapping, key=lambda item: (item[0], -time_distance(foreign_line, item[1])))
+        return best_line.text_plain
+
+    best = min(clean_lines, key=lambda line: time_distance(foreign_line, line))
+    return best.text_plain
+
+
+def extract_added_text_from_clean(full_text: str, clean_text: str) -> str:
+    """
+    Return only the text that was added in the full subtitle compared to the clean subtitle.
+
+    Expected common case:
+      clean subtitle = first part
+      full subtitle  = clean subtitle + added trailing line(s)
+
+    If there is no clear additive suffix, return an empty string.
+    """
+    full_text = full_text.replace("\\N", "\n").replace("\\n", "\n").strip()
+    clean_text = clean_text.replace("\\N", "\n").replace("\\n", "\n").strip()
+
+    if not full_text or not clean_text or full_text == clean_text:
+        return ""
+
+    full_lines = [line.strip() for line in full_text.splitlines() if line.strip()]
+    clean_lines = [line.strip() for line in clean_text.splitlines() if line.strip()]
+
+    if not full_lines or not clean_lines:
+        return ""
+
+    if len(full_lines) > len(clean_lines) and full_lines[:len(clean_lines)] == clean_lines:
+        return "\n".join(full_lines[len(clean_lines):]).strip()
+
+    if full_text.startswith(clean_text):
+        remainder = full_text[len(clean_text):].strip()
+        return remainder
+
+    return ""
+
+
+def split_foreign_text_using_clean(full_text: str, clean_text: str) -> Tuple[str, str]:
+    """
+    Return:
+      kept_text  = what should stay as the main foreign subtitle text
+      added_text = only the extra text compared to the clean subtitle
+    """
+    added_text = extract_added_text_from_clean(full_text, clean_text)
+
+    if not added_text:
+        return full_text.strip(), ""
+
+    kept_text = clean_text.strip()
+    if not kept_text:
+        kept_text = full_text.strip()
+
+    return kept_text, added_text
+
+
 def midpoint_ms(start_ms: int, end_ms: int) -> int:
     if end_ms <= start_ms:
         return start_ms
@@ -692,6 +939,53 @@ def transcode_audio_to_mp3(input_audio: Path, output_audio: Path) -> None:
     run(cmd)
 
 
+def synthesize_tts_mp3(
+    *,
+    tts_backend: Optional[TTSBackend],
+    media_dir: Path,
+    safe_prefix: str,
+    text: str,
+    language_code: Optional[str],
+    warnings: List[str],
+    card_idx: int,
+) -> str:
+    if not text:
+        warnings.append(f"TTS skipped for card {card_idx}: empty foreign text.")
+        return ""
+
+    if not language_code:
+        warnings.append(f"TTS skipped for card {card_idx}: foreign language code is unknown.")
+        return ""
+
+    if language_code not in SUPPORTED_LANGUAGES:
+        warnings.append(
+            f"TTS skipped for card {card_idx}: language code '{language_code}' is not in the built-in voice map."
+        )
+        return ""
+
+    if tts_backend is None:
+        warnings.append(f"TTS skipped for card {card_idx}: no TTS backend configured.")
+        return ""
+
+    raw_tts = media_dir / f"{safe_prefix}.aiff"
+    mp3_tts = media_dir / f"{safe_prefix}.mp3"
+
+    success = tts_backend.synthesize(text, language_code, raw_tts)
+    if not success:
+        warnings.append(
+            f"TTS skipped for card {card_idx}: local engine could not synthesize language '{language_code}'."
+        )
+        return ""
+
+    try:
+        transcode_audio_to_mp3(raw_tts, mp3_tts)
+        raw_tts.unlink(missing_ok=True)
+        return mp3_tts.name
+    except subprocess.CalledProcessError:
+        warnings.append(f"TTS generated but failed to transcode for card {card_idx}.")
+        return ""
+
+
 def make_part_label(part_number: int) -> str:
     if part_number < 10:
         return f"Part 0{part_number}"
@@ -717,24 +1011,6 @@ def make_directional_deck_name(
         return f"{parent_deck_name}::{make_part_label(part_number)} {direction}"
 
     return f"{parent_deck_name}::{direction}"
-
-
-def split_foreign_text_for_reverse(text: str) -> Tuple[str, str]:
-    lines = [
-        line.strip()
-        for line in text.replace("\\N", "\n").replace("\\n", "\n").splitlines()
-        if line.strip()
-    ]
-
-    if not lines:
-        return "", ""
-
-    if len(lines) == 1:
-        return lines[0], ""
-
-    kept_text = "\n".join(lines[:-1]).strip()
-    removed_last_line = lines[-1]
-    return kept_text, removed_last_line
 
 
 def compute_part_number(
@@ -873,10 +1149,67 @@ def note_for_direction(
     tts_tag = f'[sound:{card.tts_name}]' if card.tts_name else ""
     thumb_tag = f'<img src="{html.escape(card.thumbnail_name)}">' if card.thumbnail_name else ""
 
+    if card.is_map_card:
+        map_front_foreign = combine_main_and_small_text(
+            card.foreign_text,
+            card.foreign_transliteration,
+            card.foreign_ipa,
+        )
+
+        map_back_foreign = combine_main_and_small_text(
+            card.foreign_text,
+            card.foreign_transliteration,
+            card.foreign_ipa,
+            card.foreign_gloss,
+        )
+
+        removed_last_line = card.foreign_gloss.strip()
+
+        if card.is_reverse:
+            front_text = map_front_foreign
+            back_text = html_text(card.english_text)
+            front_visual = ""
+            front_audio = tts_tag
+            back_audio = ""
+        else:
+            front_text = html_text(card.english_text)
+            back_text = map_back_foreign
+            front_visual = ""
+            front_audio = ""
+            back_audio = tts_tag
+
+        guid = genanki.guid_for(
+            tag, "reverse" if card.is_reverse else "normal", card.idx, card.start_ms, card.end_ms, card.foreign_text
+        )
+        return genanki.Note(
+            model=model,
+            fields=[
+                front_text,
+                back_text,
+                html.escape(removed_last_line if card.is_reverse else "", quote=False),
+                "foreign-like" if card.is_reverse else "english-like",
+                "english-like" if card.is_reverse else "foreign-like",
+                front_visual,
+                front_audio,
+                back_audio,
+                f"{card.idx:08d}",
+            ],
+            tags=[tag, "reverse" if card.is_reverse else "normal"],
+            guid=guid,
+        )
+
+    # From here down, keep the original media/subtitle behavior intact.
     if card.is_reverse:
-        front_foreign, removed_last_line = split_foreign_text_for_reverse(card.foreign_text)
-        if not front_foreign:
+        if card.clean_foreign_text and card.foreign_added_text:
+            front_foreign, removed_last_line = split_foreign_text_using_clean(
+                card.foreign_text,
+                card.clean_foreign_text,
+            )
+            if not front_foreign:
+                front_foreign = card.foreign_text.strip()
+        else:
             front_foreign = card.foreign_text.strip()
+            removed_last_line = ""
 
         if source_language == "english":
             # Reverse English source:
@@ -889,7 +1222,7 @@ def note_for_direction(
             back_audio = clip_tag
         else:
             # Reverse non-English source:
-            # Front = foreign subtitles (without last line if multiline) + video clip
+            # Front = foreign subtitles + video clip
             # Back = English subtitles
             front_text = foreign_html_text(front_foreign)
             back_text = html_text(card.english_text)
@@ -922,7 +1255,7 @@ def note_for_direction(
         # Front = video clip + English subtitles
         # Back = Foreign subtitles + TTS
         front_text = html_text(card.english_text)
-        back_text = foreign_html_text(card.foreign_text)
+        back_text = foreign_html_text(card.foreign_text, card.foreign_added_text)
         front_visual = ""
         front_audio = clip_tag
         back_audio = tts_tag
@@ -931,7 +1264,7 @@ def note_for_direction(
         # Front = Thumbnail + English subtitles
         # Back = Foreign subtitles + clip
         front_text = html_text(card.english_text)
-        back_text = foreign_html_text(card.foreign_text)
+        back_text = foreign_html_text(card.foreign_text, card.foreign_added_text)
         front_visual = thumb_tag
         front_audio = ""
         back_audio = clip_tag
@@ -941,7 +1274,7 @@ def note_for_direction(
     )
     return genanki.Note(
         model=model,
-        fields = [
+        fields=[
             front_text,
             back_text,
             "",
@@ -1000,7 +1333,115 @@ def build_deck(
 
 def infer_language_code(language_name: str) -> Optional[str]:
     key = language_name.strip().lower()
+    if key in {"en", "es", "it", "fr", "de", "fa", "ar", "zh", "ru", "ja", "tl", "ko", "id"}:
+        return key
     return LANGUAGE_ALIASES.get(key)
+
+
+def make_cards_from_map(
+    aligned_pairs: List[Tuple[SubtitleLine, List[SubtitleLine]]],
+    *,
+    extras_by_index: Dict[int, dict],
+    media_dir: Path,
+    foreign_language_code: Optional[str],
+    tts_backend: Optional[TTSBackend],
+    split_every_n_cards: int,
+    split_every_minutes: float,
+    parent_deck_name: str,
+    no_reverse: bool,
+) -> Tuple[List[CardItem], List[Path], List[str]]:
+    cards: List[CardItem] = []
+    media_files: List[Path] = []
+    warnings: List[str] = []
+
+    for idx, (foreign_line, english_group) in enumerate(aligned_pairs):
+        english_text = "\n".join(e.text_plain for e in english_group).strip() or "[No English text found]"
+        foreign_text = foreign_line.text_plain
+        extras = extras_by_index.get(idx, {})
+
+        transliteration = extras.get("transliteration", "")
+        ipa = extras.get("ipa", "")
+        gloss = extras.get("gloss", "")
+
+        part_number = compute_part_number(
+            card_index_zero_based=idx,
+            clip_start_ms=foreign_line.start_ms,
+            split_every_n_cards=split_every_n_cards,
+            split_every_minutes=split_every_minutes,
+        )
+
+        split_enabled = bool(split_every_n_cards or split_every_minutes)
+
+        normal_deck_name = make_directional_deck_name(
+            parent_deck_name,
+            part_number=part_number,
+            split_enabled=split_enabled,
+            foreign_language_code=foreign_language_code,
+            reverse=False,
+        )
+
+        reverse_deck_name = make_directional_deck_name(
+            parent_deck_name,
+            part_number=part_number,
+            split_enabled=split_enabled,
+            foreign_language_code=foreign_language_code,
+            reverse=True,
+        )
+
+        safe_prefix = f"map_{idx:05d}_{slugify(foreign_text[:32])}"
+        tts_name = synthesize_tts_mp3(
+            tts_backend=tts_backend,
+            media_dir=media_dir,
+            safe_prefix=safe_prefix,
+            text=foreign_text,
+            language_code=foreign_language_code,
+            warnings=warnings,
+            card_idx=idx,
+        )
+
+        if tts_name:
+            media_files.append(media_dir / tts_name)
+
+        cards.append(
+            CardItem(
+                idx=idx,
+                start_ms=foreign_line.start_ms,
+                end_ms=foreign_line.end_ms,
+                english_text=english_text,
+                foreign_text=foreign_text,
+                foreign_transliteration=transliteration,
+                foreign_ipa=ipa,
+                foreign_gloss=gloss,
+                thumbnail_name="",
+                media_name="",
+                tts_name=tts_name,
+                deck_name=normal_deck_name,
+                is_reverse=False,
+                is_map_card=True,
+            )
+        )
+
+        if not no_reverse:
+            cards.append(
+                CardItem(
+                    idx=idx,
+                    start_ms=foreign_line.start_ms,
+                    end_ms=foreign_line.end_ms,
+                    english_text=english_text,
+                    foreign_text=foreign_text,
+                    foreign_transliteration=transliteration,
+                    foreign_ipa=ipa,
+                    foreign_gloss=gloss,
+                    thumbnail_name="",
+                    media_name="",
+                    tts_name=tts_name,
+                    deck_name=reverse_deck_name,
+                    is_reverse=True,
+                    is_map_card=True,
+                )
+            )
+
+    return cards, media_files, warnings
 
 
 def make_cards(
@@ -1028,6 +1469,8 @@ def make_cards(
     for idx, (foreign_line, english_group) in enumerate(aligned_pairs):
         english_text = "\n".join(e.text_plain for e in english_group).strip() or "[No English subtitle found]"
         foreign_text = foreign_line.text_plain
+        clean_foreign_text = choose_clean_text_for_line(foreign_line, clean_tts_lines)
+        foreign_added_text = extract_added_text_from_clean(foreign_text, clean_foreign_text)
         part_number = compute_part_number(
             card_index_zero_based=idx,
             clip_start_ms=foreign_line.start_ms,
@@ -1123,11 +1566,17 @@ def make_cards(
                 end_ms=foreign_line.end_ms,
                 english_text=english_text,
                 foreign_text=foreign_text,
+                clean_foreign_text=clean_foreign_text,
+                foreign_added_text=foreign_added_text,
+                foreign_transliteration="",
+                foreign_ipa="",
+                foreign_gloss="",
                 thumbnail_name=thumbnail_name,
                 media_name=clip_path.name,
                 tts_name=tts_name,
                 deck_name=normal_deck_name,
                 is_reverse=False,
+                is_map_card=False,
             )
         )
 
@@ -1139,11 +1588,17 @@ def make_cards(
                     end_ms=foreign_line.end_ms,
                     english_text=english_text,
                     foreign_text=foreign_text,
+                    clean_foreign_text=clean_foreign_text,
+                    foreign_added_text=foreign_added_text,
+                    foreign_transliteration="",
+                    foreign_ipa="",
+                    foreign_gloss="",
                     thumbnail_name=thumbnail_name,
                     media_name=clip_path.name,
                     tts_name=tts_name,
                     deck_name=reverse_deck_name,
                     is_reverse=True,
+                    is_map_card=False,
                 )
             )
 
@@ -1212,6 +1667,63 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not root.is_dir():
         raise DeckError(f"Not a directory: {root}")
 
+    map_json_path = find_map_json_path(root)
+    tts_backend = build_tts_backend(args)
+    output_apkg = args.output or (root / f"{slugify(args.deck_name)}.apkg")
+
+    if map_json_path is not None:
+        media_files_in_dir = [p for p in root.iterdir() if p.is_file() and p.suffix.lower() in MEDIA_EXTS]
+        subtitle_files_in_dir = [
+            p for p in root.iterdir()
+            if p.is_file() and p.suffix.lower() in SUB_EXTS and p.name.lower() != "map.json"
+        ]
+
+        if media_files_in_dir or subtitle_files_in_dir:
+            raise DeckError(
+                "When using Map.json mode, the directory must contain only Map.json and no media/subtitle input files."
+            )
+
+        ensure_tool("ffmpeg")
+
+        payload = load_map_json(map_json_path)
+        aligned_pairs, extras_by_index, foreign_language_code = build_map_aligned_pairs(payload)
+
+        with tempfile.TemporaryDirectory(prefix="anki_map_deck_") as tmpdir:
+            media_dir = Path(tmpdir)
+            cards, media_files, warnings = make_cards_from_map(
+                aligned_pairs,
+                extras_by_index=extras_by_index,
+                media_dir=media_dir,
+                foreign_language_code=foreign_language_code,
+                tts_backend=tts_backend,
+                split_every_n_cards=args.split_every_n_cards,
+                split_every_minutes=args.split_every_minutes,
+                parent_deck_name=args.deck_name,
+                no_reverse=args.no_reverse,
+            )
+
+            build_deck(
+                output_apkg,
+                args.deck_name,
+                media_files,
+                cards,
+                args.tag,
+                "foreign",
+            )
+
+        print(f"Created deck: {output_apkg}")
+        print(f"Input: {map_json_path.name}")
+        print(f"Aligned pairs: {len(aligned_pairs)}")
+        print(f"Cards: {len(cards)}")
+        print(f"Foreign language: {foreign_language_code or 'unknown'}")
+        if warnings:
+            print("\nWarnings:")
+            for w in warnings[:50]:
+                print(f"- {w}")
+            if len(warnings) > 50:
+                print(f"- ... and {len(warnings) - 50} more")
+        return 0
+
     ensure_tool("ffmpeg")
     ensure_tool("ffprobe")
 
@@ -1237,9 +1749,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     aligned_pairs = align_subtitles(foreign_lines, english_lines)
     if not aligned_pairs:
         raise DeckError("No subtitle pairs could be aligned")
-
-    tts_backend = build_tts_backend(args)
-    output_apkg = args.output or (root / f"{slugify(args.deck_name)}.apkg")
 
     with tempfile.TemporaryDirectory(prefix="anki_video_deck_") as tmpdir:
         media_dir = Path(tmpdir)
