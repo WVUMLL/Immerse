@@ -1,5 +1,6 @@
 cmake
 genanki
+pillow
 pysubs2
 mlx-whisper
 faster-whisper
