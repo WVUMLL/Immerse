@@ -57,6 +57,12 @@ except ImportError:  # pragma: no cover
     print("Missing dependency: pysubs2. Install with: pip install pysubs2", file=sys.stderr)
     raise
 
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:  # pragma: no cover
+    print("Missing dependency: pillow. Install with: pip install pillow", file=sys.stderr)
+    raise
+
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".m4v", ".avi", ".webm"}
 AUDIO_EXTS = {".mp3", ".wav", ".aac", ".flac", ".ogg", ".wma", ".alac", ".pcm", ".aiff"}
@@ -145,6 +151,8 @@ class CardItem:
     deck_name: str = ""
     is_reverse: bool = False
     is_map_card: bool = False
+    map_front_image_name: str = ""
+    map_back_image_name: str = ""
 
 
 class DeckError(RuntimeError):
@@ -394,9 +402,9 @@ def build_map_aligned_pairs(
     aligned_pairs: List[Tuple[SubtitleLine, List[SubtitleLine]]] = []
     extras_by_index: Dict[int, dict] = {}
 
-    current_ms = 0
+    prepared_segments: List[dict] = []
 
-    for idx, segment in enumerate(segments):
+    for segment in segments:
         if not isinstance(segment, dict):
             continue
 
@@ -421,6 +429,24 @@ def build_map_aligned_pairs(
         if not english_text or not foreign_text:
             continue
 
+        prepared_segments.append(
+            {
+                "english_text": english_text,
+                "foreign_text": foreign_text,
+                "transliteration": clean_subtitle_text(str(foreign_obj.get("transliteration", "") or "")),
+                "ipa": clean_subtitle_text(str(foreign_obj.get("ipa", "") or "")),
+                "gloss": clean_subtitle_text(str(foreign_obj.get("gloss", "") or "")),
+            }
+        )
+
+    if not prepared_segments:
+        raise DeckError("Map.json did not contain any usable source/target text pairs.")
+
+    current_ms = 0
+    for idx, item in enumerate(prepared_segments):
+        english_text = item["english_text"]
+        foreign_text = item["foreign_text"]
+
         english_line = SubtitleLine(
             start_ms=current_ms,
             end_ms=current_ms + 1000,
@@ -436,10 +462,17 @@ def build_map_aligned_pairs(
 
         aligned_pairs.append((foreign_line, [english_line]))
 
+        prev_items = prepared_segments[max(0, idx - 2):idx]
+        next_items = prepared_segments[idx + 1:idx + 3]
+
         extras_by_index[idx] = {
-            "transliteration": clean_subtitle_text(str(foreign_obj.get("transliteration", "") or "")),
-            "ipa": clean_subtitle_text(str(foreign_obj.get("ipa", "") or "")),
-            "gloss": clean_subtitle_text(str(foreign_obj.get("gloss", "") or "")),
+            "transliteration": item["transliteration"],
+            "ipa": item["ipa"],
+            "gloss": item["gloss"],
+            "prev_english_texts": [x["english_text"] for x in prev_items],
+            "next_english_texts": [x["english_text"] for x in next_items],
+            "prev_foreign_texts": [x["foreign_text"] for x in prev_items],
+            "next_foreign_texts": [x["foreign_text"] for x in next_items],
         }
 
         current_ms += 1000
@@ -448,9 +481,6 @@ def build_map_aligned_pairs(
     foreign_language_code = infer_language_code(
         str(metadata.get("target_language" if english_side == "source" else "source_language", "")).strip()
     )
-
-    if not aligned_pairs:
-        raise DeckError("Map.json did not contain any usable source/target text pairs.")
 
     return aligned_pairs, extras_by_index, (foreign_language_code or "")
 
@@ -986,6 +1016,222 @@ def synthesize_tts_mp3(
         return ""
 
 
+def load_page_font(font_size: int) -> ImageFont.ImageFont:
+    candidates = [
+        "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
+        "/System/Library/Fonts/Supplemental/Georgia.ttf",
+        "/System/Library/Fonts/Supplemental/Palatino.ttc",
+        "/System/Library/Fonts/SFNS.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
+    ]
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, font_size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def wrap_text_for_width(text: str, draw: ImageDraw.ImageDraw, font: ImageFont.ImageFont, max_width: int) -> List[str]:
+    text = (text or "").strip()
+    if not text:
+        return []
+
+    paragraphs = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    lines: List[str] = []
+
+    for paragraph in paragraphs:
+        paragraph = " ".join(paragraph.split())
+        if not paragraph:
+            lines.append("")
+            continue
+
+        words = paragraph.split()
+        current = words[0]
+
+        for word in words[1:]:
+            candidate = f"{current} {word}"
+            bbox = draw.textbbox((0, 0), candidate, font=font)
+            width = bbox[2] - bbox[0]
+            if width <= max_width:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+
+        lines.append(current)
+
+    return lines
+
+
+def draw_lines_centered(
+    draw: ImageDraw.ImageDraw,
+    lines: List[str],
+    *,
+    font: ImageFont.ImageFont,
+    fill: Tuple[int, int, int, int],
+    image_width: int,
+    y_start: int,
+    line_gap: int,
+) -> int:
+    y = y_start
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line if line else " ", font=font)
+        line_width = bbox[2] - bbox[0]
+        line_height = bbox[3] - bbox[1]
+        x = (image_width - line_width) // 2
+        draw.text((x, y), line if line else " ", font=font, fill=fill)
+        y += line_height + line_gap
+    return y
+
+
+def estimate_block_height(
+    draw: ImageDraw.ImageDraw,
+    lines: List[str],
+    *,
+    font: ImageFont.ImageFont,
+    line_gap: int,
+) -> int:
+    if not lines:
+        return 0
+
+    total = 0
+    for i, line in enumerate(lines):
+        bbox = draw.textbbox((0, 0), line if line else " ", font=font)
+        line_height = bbox[3] - bbox[1]
+        total += line_height
+        if i < len(lines) - 1:
+            total += line_gap
+    return total
+
+
+def create_map_context_image(
+    *,
+    prev_texts: List[str],
+    current_text: str,
+    next_texts: List[str],
+    output_path: Path,
+    image_width: int = 900,
+    horizontal_padding: int = 85,
+    top_bottom_padding: int = 55,
+    block_gap: int = 28,
+    line_gap: int = 10,
+    background_hex: str = "#f1e1c9",
+) -> bool:
+    current_text = (current_text or "").strip()
+    if not current_text:
+        return False
+
+    font = load_page_font(34)
+    dummy = Image.new("RGBA", (image_width, 100), (255, 255, 255, 0))
+    dummy_draw = ImageDraw.Draw(dummy)
+    usable_width = image_width - (horizontal_padding * 2)
+
+    prev_blocks = []
+    for text in prev_texts:
+        lines = wrap_text_for_width(text, dummy_draw, font, usable_width)
+        if lines:
+            prev_blocks.append(lines)
+
+    current_lines = wrap_text_for_width(current_text, dummy_draw, font, usable_width)
+
+    next_blocks = []
+    for text in next_texts:
+        lines = wrap_text_for_width(text, dummy_draw, font, usable_width)
+        if lines:
+            next_blocks.append(lines)
+
+    current_height = estimate_block_height(dummy_draw, current_lines, font=font, line_gap=line_gap)
+
+    def blocks_height(blocks: List[List[str]]) -> int:
+        if not blocks:
+            return 0
+        total = 0
+        for i, block in enumerate(blocks):
+            total += estimate_block_height(dummy_draw, block, font=font, line_gap=line_gap)
+            if i < len(blocks) - 1:
+                total += block_gap
+        return total
+
+    prev_height = blocks_height(prev_blocks)
+    next_height = blocks_height(next_blocks)
+
+    blank_context_height = current_height
+
+    top_context_height = prev_height if prev_blocks else blank_context_height
+    bottom_context_height = next_height if next_blocks else blank_context_height
+
+    image_height = (
+        top_bottom_padding
+        + top_context_height
+        + block_gap
+        + current_height
+        + block_gap
+        + bottom_context_height
+        + top_bottom_padding
+    )
+
+    image = Image.new("RGBA", (image_width, image_height), background_hex)
+    draw = ImageDraw.Draw(image)
+
+    context_layer = Image.new("RGBA", (image_width, image_height), (0, 0, 0, 0))
+    context_draw = ImageDraw.Draw(context_layer)
+
+    current_fill = (0, 0, 0, 255)
+    context_fill = (0, 0, 0, 128)
+
+    y = top_bottom_padding
+
+    if prev_blocks:
+        for block_idx, block_lines in enumerate(prev_blocks):
+            y = draw_lines_centered(
+                context_draw,
+                block_lines,
+                font=font,
+                fill=context_fill,
+                image_width=image_width,
+                y_start=y,
+                line_gap=line_gap,
+            )
+            if block_idx < len(prev_blocks) - 1:
+                y += block_gap
+    else:
+        y += blank_context_height
+
+    y += block_gap
+
+    y = draw_lines_centered(
+        draw,
+        current_lines,
+        font=font,
+        fill=current_fill,
+        image_width=image_width,
+        y_start=y,
+        line_gap=line_gap,
+    )
+
+    y += block_gap
+
+    if next_blocks:
+        for block_idx, block_lines in enumerate(next_blocks):
+            y = draw_lines_centered(
+                context_draw,
+                block_lines,
+                font=font,
+                fill=context_fill,
+                image_width=image_width,
+                y_start=y,
+                line_gap=line_gap,
+            )
+            if block_idx < len(next_blocks) - 1:
+                y += block_gap
+
+    image = Image.alpha_composite(image, context_layer)
+    image.save(output_path, format="PNG")
+    return output_path.exists() and output_path.stat().st_size > 0
+
+
 def make_part_label(part_number: int) -> str:
     if part_number < 10:
         return f"Part 0{part_number}"
@@ -1068,6 +1314,7 @@ def create_note_model(model_id: int) -> genanki.Model:
             {"name": "FrontTextClass"},
             {"name": "BackTextClass"},
             {"name": "FrontVisual"},
+            {"name": "BackVisual"},
             {"name": "FrontAudio"},
             {"name": "BackAudio"},
             {"name": "SortKey"},
@@ -1084,6 +1331,7 @@ def create_note_model(model_id: int) -> genanki.Model:
 {{FrontSide}}
 <hr id=answer>
 {{#RemovedLastLine}}<div class="line"><span class="subtitle-bottom-line">{{RemovedLastLine}}</span></div>{{/RemovedLastLine}}
+{{#BackVisual}}<div class=\"frame\">{{BackVisual}}</div>{{/BackVisual}}
 <div class="line back-text {{BackTextClass}}">{{BackText}}</div>
 {{#BackAudio}}<div class=\"media\">{{BackAudio}}</div>{{/BackAudio}}
 """,
@@ -1148,6 +1396,8 @@ def note_for_direction(
     clip_tag = f'[sound:{card.media_name}]' if card.media_name else ""
     tts_tag = f'[sound:{card.tts_name}]' if card.tts_name else ""
     thumb_tag = f'<img src="{html.escape(card.thumbnail_name)}">' if card.thumbnail_name else ""
+    map_front_tag = f'<img src="{html.escape(card.map_front_image_name)}">' if card.map_front_image_name else ""
+    map_back_tag = f'<img src="{html.escape(card.map_back_image_name)}">' if card.map_back_image_name else ""
 
     if card.is_map_card:
         map_front_foreign = combine_main_and_small_text(
@@ -1168,13 +1418,23 @@ def note_for_direction(
         if card.is_reverse:
             front_text = map_front_foreign
             back_text = html_text(card.english_text)
+            if map_front_tag:
+                front_text = f'{front_text}<div class="frame">{map_front_tag}</div>'
+            if map_back_tag:
+                back_text = f'{back_text}<div class="frame">{map_back_tag}</div>'
             front_visual = ""
+            back_visual = ""
             front_audio = tts_tag
             back_audio = ""
         else:
             front_text = html_text(card.english_text)
             back_text = map_back_foreign
+            if map_front_tag:
+                front_text = f'{front_text}<div class="frame">{map_front_tag}</div>'
+            if map_back_tag:
+                back_text = f'{back_text}<div class="frame">{map_back_tag}</div>'
             front_visual = ""
+            back_visual = ""
             front_audio = ""
             back_audio = tts_tag
 
@@ -1190,6 +1450,7 @@ def note_for_direction(
                 "foreign-like" if card.is_reverse else "english-like",
                 "english-like" if card.is_reverse else "foreign-like",
                 front_visual,
+                back_visual,
                 front_audio,
                 back_audio,
                 f"{card.idx:08d}",
@@ -1242,6 +1503,7 @@ def note_for_direction(
                 "foreign-like",
                 "english-like",
                 front_visual,
+                "",
                 front_audio,
                 back_audio,
                 f"{card.idx:08d}",
@@ -1281,6 +1543,7 @@ def note_for_direction(
             "english-like",
             "foreign-like",
             front_visual,
+            "",
             front_audio,
             back_audio,
             f"{card.idx:08d}",
@@ -1362,6 +1625,10 @@ def make_cards_from_map(
         transliteration = extras.get("transliteration", "")
         ipa = extras.get("ipa", "")
         gloss = extras.get("gloss", "")
+        prev_english_texts = extras.get("prev_english_texts", [])
+        next_english_texts = extras.get("next_english_texts", [])
+        prev_foreign_texts = extras.get("prev_foreign_texts", [])
+        next_foreign_texts = extras.get("next_foreign_texts", [])
 
         part_number = compute_part_number(
             card_index_zero_based=idx,
@@ -1389,6 +1656,39 @@ def make_cards_from_map(
         )
 
         safe_prefix = f"map_{idx:05d}_{slugify(foreign_text[:32])}"
+
+        front_image_path = media_dir / f"{safe_prefix}_front.png"
+        back_image_path = media_dir / f"{safe_prefix}_back.png"
+
+        front_image_ok = create_map_context_image(
+            prev_texts=prev_english_texts,
+            current_text=english_text,
+            next_texts=next_english_texts,
+            output_path=front_image_path,
+        )
+
+        back_image_ok = create_map_context_image(
+            prev_texts=prev_foreign_texts,
+            current_text=foreign_text,
+            next_texts=next_foreign_texts,
+            output_path=back_image_path,
+        )
+
+        front_image_name = ""
+        back_image_name = ""
+
+        if front_image_ok:
+            media_files.append(front_image_path)
+            front_image_name = front_image_path.name
+        else:
+            warnings.append(f"Map image skipped for card {idx} front side.")
+
+        if back_image_ok:
+            media_files.append(back_image_path)
+            back_image_name = back_image_path.name
+        else:
+            warnings.append(f"Map image skipped for card {idx} back side.")
+
         tts_name = synthesize_tts_mp3(
             tts_backend=tts_backend,
             media_dir=media_dir,
@@ -1418,6 +1718,8 @@ def make_cards_from_map(
                 deck_name=normal_deck_name,
                 is_reverse=False,
                 is_map_card=True,
+                map_front_image_name=front_image_name,
+                map_back_image_name=back_image_name,
             )
         )
 
@@ -1438,6 +1740,8 @@ def make_cards_from_map(
                     deck_name=reverse_deck_name,
                     is_reverse=True,
                     is_map_card=True,
+                    map_front_image_name=back_image_name,
+                    map_back_image_name=front_image_name,
                 )
             )
 
@@ -1577,6 +1881,8 @@ def make_cards(
                 deck_name=normal_deck_name,
                 is_reverse=False,
                 is_map_card=False,
+                map_front_image_name="",
+                map_back_image_name="",
             )
         )
 
@@ -1599,6 +1905,8 @@ def make_cards(
                     deck_name=reverse_deck_name,
                     is_reverse=True,
                     is_map_card=False,
+                    map_front_image_name="",
+                    map_back_image_name="",
                 )
             )
 
