@@ -251,9 +251,6 @@ Generate subtitles in .srt format using the provided lyrics that are in .lrc for
 
 ## Anki Generation
 
-**TODO:**
-- [ ] Screenshot generated from text to show preceding and following sentence for context.
-
 ### Basic usage
 
 #### 1. If you made an environment, activate it. Otherwise, skip to step 2.
