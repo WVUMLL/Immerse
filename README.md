@@ -242,7 +242,10 @@ Insert Leipzig gloss into the provided [LANGUAGE] subtitles file such that each 
 Filter the provided subtitles file to only retain dialgoue that could be heard or said in [CONTEXT]. Generate an updated subtitles file of the same format. Be sure to keep the same time intervals and original subtitle content for the dialogue that is not removed.
 ```
 
-> For map.json files, just remove "subtitles". For other text files, replace "subtitles" with "text file"
+> For map.json files, just remove "subtitles". For other text files, replace "subtitles" with "text file".
+> 
+> This can also be modified to filter dialogue for a certain proficiency level (e.g., CEFR B1).
+
 #### Songs: .LRC → .SRT
 
 ```
