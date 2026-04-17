@@ -41,6 +41,7 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -62,6 +63,23 @@ try:
 except ImportError:  # pragma: no cover
     print("Missing dependency: pillow. Install with: pip install pillow", file=sys.stderr)
     raise
+
+
+try:
+    import sherpa_onnx
+except ImportError as exc:  # pragma: no cover
+    sherpa_onnx = None
+    SHERPA_IMPORT_ERROR = exc
+else:
+    SHERPA_IMPORT_ERROR = None
+
+try:
+    import soundfile as sf
+except ImportError as exc:  # pragma: no cover
+    sf = None
+    SOUNDFILE_IMPORT_ERROR = exc
+else:
+    SOUNDFILE_IMPORT_ERROR = None
 
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".m4v", ".avi", ".webm"}
@@ -215,41 +233,112 @@ class SherpaOnnxTTS(TTSBackend):
     ):
         self.model_dir = model_dir
         self.tokens_file = tokens_file or (model_dir / "tokens.txt")
-        self.data_dir = data_dir
+
+        default_data_dir = model_dir / "espeak-ng-data"
+        self.data_dir = data_dir or (default_data_dir if default_data_dir.exists() else None)
+
         self.dict_dir = dict_dir
         self.rule_fsts = rule_fsts
         self.rule_fars = rule_fars
 
+        self._tts = None
+        self._tts_error = None
+
     def synthesize(self, text: str, language_code: str, output_path: Path) -> bool:
-        exe = shutil.which("sherpa-onnx-offline-tts")
-        if exe is None:
-            return False
-        model_file = self._discover_model_file()
-        if model_file is None or not self.tokens_file.exists():
-            return False
-        cmd = [
-            exe,
-            "--tokens", str(self.tokens_file),
-            "--vits-model", str(model_file),
-            "--output-filename", str(output_path),
-            text,
-        ]
-        if self.data_dir and self.data_dir.exists():
-            cmd.extend(["--data-dir", str(self.data_dir)])
-        if self.dict_dir and self.dict_dir.exists():
-            cmd.extend(["--dict-dir", str(self.dict_dir)])
-        if self.rule_fsts and self.rule_fsts.exists():
-            cmd.extend(["--rule-fsts", str(self.rule_fsts)])
-        if self.rule_fars and self.rule_fars.exists():
-            cmd.extend(["--rule-fars", str(self.rule_fars)])
-        try:
-            run(cmd)
-            return output_path.exists() and output_path.stat().st_size > 0
-        except subprocess.CalledProcessError:
+        if sherpa_onnx is None:
+            raise DeckError(
+                f"Sherpa Python package is not importable in this Python environment: {SHERPA_IMPORT_ERROR}"
+            )
+
+        if sf is None:
+            raise DeckError(
+                f"Python package 'soundfile' is not importable in this Python environment: {SOUNDFILE_IMPORT_ERROR}"
+            )
+
+        if not text.strip():
             return False
 
+        tts = self._get_tts()
+
+        gen_config = sherpa_onnx.GenerationConfig()
+        gen_config.sid = 0
+        gen_config.speed = 1.0
+        gen_config.silence_scale = 0.2
+
+        try:
+            audio = tts.generate(text, gen_config)
+        except Exception as exc:
+            raise DeckError(f"Sherpa generation error: {exc}")
+
+        if len(audio.samples) == 0:
+            raise DeckError("Sherpa generated zero audio samples.")
+
+        try:
+            sf.write(
+                str(output_path),
+                audio.samples,
+                samplerate=audio.sample_rate,
+                subtype="PCM_16",
+            )
+        except Exception as exc:
+            raise DeckError(f"Failed to save Sherpa WAV output: {exc}")
+
+        return output_path.exists() and output_path.stat().st_size > 0
+
+    def _get_tts(self):
+        if self._tts is not None:
+            return self._tts
+
+        if self._tts_error is not None:
+            raise DeckError(f"Sherpa TTS initialization already failed: {self._tts_error}")
+
+        model_file = self._discover_model_file()
+        if model_file is None:
+            raise DeckError(f"No .onnx model file found in Sherpa model dir: {self.model_dir}")
+
+        if not self.tokens_file.exists():
+            raise DeckError(f"tokens.txt not found in Sherpa model dir: {self.tokens_file}")
+
+        try:
+            config = sherpa_onnx.OfflineTtsConfig(
+                model=sherpa_onnx.OfflineTtsModelConfig(
+                    vits=sherpa_onnx.OfflineTtsVitsModelConfig(
+                        model=str(model_file),
+                        lexicon=str(self.dict_dir) if self.dict_dir and self.dict_dir.exists() else "",
+                        data_dir=str(self.data_dir) if self.data_dir and self.data_dir.exists() else "",
+                        tokens=str(self.tokens_file),
+                    ),
+                    provider="cpu",
+                    debug=True,
+                    num_threads=1,
+                ),
+                rule_fsts=str(self.rule_fsts) if self.rule_fsts and self.rule_fsts.exists() else "",
+                max_num_sentences=1,
+            )
+
+            if not config.validate():
+                raise DeckError(
+                    "Sherpa config validation failed. Check that the model directory contains the correct .onnx file, tokens.txt, and any required espeak-ng-data folder."
+                )
+
+            self._tts = sherpa_onnx.OfflineTts(config)
+            return self._tts
+
+        except Exception as exc:
+            self._tts_error = str(exc)
+            raise DeckError(f"Sherpa initialization error: {exc}")
+
     def _discover_model_file(self) -> Optional[Path]:
-        candidates = list(self.model_dir.glob("*.onnx"))
+        preferred_names = [
+            "model.onnx",
+            "generator.onnx",
+        ]
+        for name in preferred_names:
+            candidate = self.model_dir / name
+            if candidate.exists():
+                return candidate
+
+        candidates = sorted(self.model_dir.glob("*.onnx"))
         return candidates[0] if candidates else None
 
 
@@ -997,7 +1086,7 @@ def synthesize_tts_mp3(
         warnings.append(f"TTS skipped for card {card_idx}: no TTS backend configured.")
         return ""
 
-    raw_tts = media_dir / f"{safe_prefix}.aiff"
+    raw_tts = media_dir / f"{safe_prefix}.wav"
     mp3_tts = media_dir / f"{safe_prefix}.mp3"
 
     success = tts_backend.synthesize(text, language_code, raw_tts)
