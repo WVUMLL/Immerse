@@ -144,7 +144,7 @@ python -m pip install -U "demucs-mlx[convert]"
 6. [Translate your subtitles](#prompt-translate-foreign--english-subtitles) into the 'opposite' language (English if the subtitles are in your target language, or your target language if the subtitles are in English). Make sure the translated subtitles file is named after its language.
 7. If you want to reverse Engineer your target language's grammar using Leipzig gloss, or need transliterations, [modify the foreign language subtitles](#prompt-optional-add-leipzig-gloss--transliteration-to-foreign-subtitles).
 8. Make sure your folder from step 1 now has the video and both subtitles.
-9. [Generate your Anki deck!](#anki-generation) Make sure to use the `--source-language english` argument if the video you're using is in English (this will generate text-to-speech from the foreign subtitles).
+9. [Generate your Anki deck](#anki-generation)! Make sure to use the `--source-language english` argument if the video you're using is in English (this will generate text-to-speech from the foreign subtitles). If your source video is in English and target language is **Persian (Farsi), Arabic, Tagalog, or Indonesian**, be sure also follow [these instructions](#sherpa-onnx-usage-necessary-for-persian-farsi-arabic-tagalog-and-indonesian-text-to-speech-otherwise-optional).
 
 ### Using an Audio file (NOT a song)
 
@@ -159,7 +159,7 @@ Follow the same steps as you would [for a video](#using-a-video), just using you
 5. [Translate your subtitles](#prompt-translate-foreign--english-subtitles) into the 'opposite' language (English if the subtitles are in your target language, or your target language if the subtitles are in English). Make sure the translated subtitles file is named after its language.
 6. If you want to reverse Engineer your target language's grammar using Leipzig gloss, or need transliterations, [modify the foreign language subtitles](#prompt-optional-add-leipzig-gloss--transliteration-to-foreign-subtitles).
 7. Make sure your folder from step 1 now has the song and both subtitles.
-8. [Generate your Anki deck!](#anki-generation) Make sure to use the `--source-language english` argument if the song is in English (this will generate text-to-speech from the foreign subtitles).
+8. [Generate your Anki deck](#anki-generation)! Make sure to use the `--source-language english` argument if the song is in English (this will generate text-to-speech from the foreign subtitles). If your song is in English and target language is **Persian (Farsi), Arabic, Tagalog, or Indonesian**, be sure also follow [these instructions](#sherpa-onnx-usage-necessary-for-persian-farsi-arabic-tagalog-and-indonesian-text-to-speech-otherwise-optional).
 
 ### Using Text
 
@@ -168,7 +168,7 @@ Follow the same steps as you would [for a video](#using-a-video), just using you
 3. [Generate a Map.json file](#mapjson-construction) from your two text translations.
 4. If you want to reverse Engineer your target language's grammar using Leipzig gloss, or need transliterations, [modify the Map.json file](#prompt-optional-add-leipzig-gloss--transliteration-to-foreign-mapped-segments).
 5. Create a folder and place your final `Map.json` file inside it. Make sure it is named `Map.json`.
-6. [Generate your Anki deck!](#anki-generation)
+6. [Generate your Anki deck](#anki-generation)! If your target language is **Persian (Farsi), Arabic, Tagalog, or Indonesian**, be sure also follow [these instructions](#sherpa-onnx-usage-necessary-for-persian-farsi-arabic-tagalog-and-indonesian-text-to-speech-otherwise-optional).
 
 ## Subtitle Generation
 
@@ -323,15 +323,10 @@ python /path/to/Immerse-main/anki_media_deck.py [PUT_FOLDER_PATH_HERE] --deck-na
 --no-reverse
 ```
 
-### Optional sherpa-onnx usage (Necessary for Persian (Farsi), Arabic, Tagalog, and Indonesian Text-to-Speech)
+### Sherpa-onnx usage: Necessary for Persian (Farsi), Arabic, Tagalog, and Indonesian Text-to-Speech. Otherwise optional.
 
-**TODO:**
-- [ ] Language model installation instructions
-- [ ] Links for Persian (Farsi), Arabic, Tagalog, and Indonesian models
+1. Download the text-to-speech model for your target language [here](https://k2-fsa.github.io/sherpa/onnx/tts/all/index.html).
+2. Unzip the download. You should now have a folder.
+3. Place the folder wherever you want it to live on your MacBook.
+4. Include `--tts-engine sherpa --sherpa-model-dir [MODEL_PATH]` at the end of your Terminal command, where `[MODEL_PATH]` is the path to the model's folder.
 
-```
-# Usage Example
-python /path/to/Immerse-main/anki_media_deck.py [FOLDER_PATH] --deck-name "[DECK_NAME]" --source-video-language english --tts-engine sherpa --sherpa-model-dir [MODEL_PATH] --split-every-n-cards 10
-```
-You will need to manually download the model for your target language and send it.
-If this is confusing or overwhelming, just ignore it. It's not necessary.
