@@ -127,13 +127,13 @@ python -m pip install -U "demucs-mlx[convert]"
 
 ## Program Workflow
 
-**START HERE: What media would you like to use?**
+✨ **START HERE: What media would you like to use?** ✨
 - [A video (clip, recording, episode, movie, etc.)](#using-a-video)
 - [Audio (Recordings, podcasts, etc.)](#using-an-audio-file-not-a-song)
 - [A Song](#using-a-song)
 - [Text (.txt, .docx, .pdf, .epub, etc.)](#using-text)
 
-### Using a Video
+### Using a Video 🎥
 
 0. The longer your video is, the longer it will take to generate subtitles for it (e.g., it can take a few hours to transcribe 40 minutes). If you don't want to wait that long, or can't use that much of your MacBook's resources at the moment, we recommend splitting longer videos into parts and doing this in batches.
 1. Create a folder and put your video file inside it.
@@ -146,11 +146,11 @@ python -m pip install -U "demucs-mlx[convert]"
 8. Make sure your folder from step 1 now has the video and both subtitles.
 9. [Generate your Anki deck](#anki-generation)! Make sure to use the `--source-language english` argument if the video you're using is in English (this will generate text-to-speech from the foreign subtitles). If your source video is in English and target language is **Persian (Farsi), Arabic, Tagalog, or Indonesian**, be sure also follow [these instructions](#sherpa-onnx-usage-necessary-for-persian-farsi-arabic-tagalog-and-indonesian-text-to-speech-otherwise-optional).
 
-### Using an Audio file (NOT a song)
+### Using an Audio file (NOT a song) 🔊
 
 Follow the same steps as you would [for a video](#using-a-video), just using your audio file instead of a video.
 
-### Using a song
+### Using a song 🎶
 
 1. Create a folder and put your song file inside it
 2. _If you have a .LRC lyrics file for the song_, [convert it into a .srt file](#prompt-for-songs-lrc--srt).
@@ -161,7 +161,7 @@ Follow the same steps as you would [for a video](#using-a-video), just using you
 7. Make sure your folder from step 1 now has the song and both subtitles.
 8. [Generate your Anki deck](#anki-generation)! Make sure to use the `--source-language english` argument if the song is in English (this will generate text-to-speech from the foreign subtitles). If your song is in English and target language is **Persian (Farsi), Arabic, Tagalog, or Indonesian**, be sure also follow [these instructions](#sherpa-onnx-usage-necessary-for-persian-farsi-arabic-tagalog-and-indonesian-text-to-speech-otherwise-optional).
 
-### Using Text
+### Using Text 📚
 
 1. Do you have a specific goal with this media (only study clinical dialogue, only learn at an A1 fluency level, etc.)? If yes, [filter the text](#prompt-optional-context-filtering) (or manually edit) to retain only relevant content. If no, or you just want to use all of the content, skip this step.
 2. _If you only have one translation of your text_, [generate a translation](#prompt-translate-foreign--english-text). _If you have both translations already_, skip this step.
