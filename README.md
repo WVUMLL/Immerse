@@ -20,7 +20,7 @@ Developed by Armin Salehipour for WVU Medical Language Learners.
 
 # How to Install
 
-⚠️ This program is intended for WVU HSC students and assumes your device is a MacBook Air ⚠️
+⚠️ This program is intended for WVU HSC students and assumes your device is a MacBook provided by the school ⚠️
 
 These instructions are also intended for those with little-to-no experience using Terminal or working with python.
 If you have experience with these things, feel free to deviate from the instructions as you see fit!
