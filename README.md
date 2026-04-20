@@ -127,17 +127,48 @@ python -m pip install -U "demucs-mlx[convert]"
 
 ## Program Workflow
 
-**Inputs:** Audiovisual Media (supplements: .LRC → Assume song, English subs), Single text, Two texts
+**START HERE: What media would you like to use?**
+- [A video (clip, recording, episode, movie, etc.)](#using-a-video)
+- [Audio (Recordings, podcasts, etc.)](#using-an-audio-file-not-a-song)
+- [A Song](#using-a-song)
+- [Text (.txt, .docx, .pdf, .epub, etc.)](#using-text)
 
-Media → Generate Subtitles (--song?) → [LLM] Context Filter? → [LLM] Translate Subtitles → [LLM] Gloss (rename original to clean)? → Anki (--deck-name, --source-language english?, --split?)
-…
-Generate w/ --song ⇒ Go straight to Translate
+### Using a Video
 
-Media + .LRC → [LLM] Convert to .SRT → [LLM] Translate Subtitles → ...
+0. The longer your video is, the longer it will take to generate subtitles for it (e.g., it can take a few hours to transcribe 40 minutes). If you don't want to wait that long, or can't use that much of your MacBook's resources at the moment, we recommend splitting longer videos into parts and doing this in batches.
+1. Create a folder and put your video file inside it.
+2. _If you have a subtitles file_, make sure it matches the video's timing and content (sometimes subtitles translations differ from dubbing).
+3. _If you don't have subtitles_, [generate them](#subtitle-generation).
+4. Make sure your subtitles file is in the same folder as your video and named after its language (e.g., `Spanish.srt` or `English.srt`).
+5. Do you have a specific goal with this media (only study clinical dialogue, only learn at an A1 fluency level, etc.)? If yes, [filter the subtitles](#prompt-optional-context-filtering) to retain only relevant content. If no, or you just want to use all of the content, skip this step.
+6. [Translate your subtitles](#prompt-translate-foreign--english-subtitles) into the 'opposite' language (English if the subtitles are in your target language, or your target language if the subtitles are in English). Make sure the translated subtitles file is named after its language.
+7. If you want to reverse Engineer your target language's grammar using Leipzig gloss, or need transliterations, [modify the foreign language subtitles](#prompt-optional-add-leipzig-gloss--transliteration-to-foreign-subtitles).
+8. Make sure your folder from step 1 now has the video and both subtitles.
+9. [Generate your Anki deck!](#anki-generation) Make sure to use the `--source-language english` argument if the video you're using is in English (this will generate text-to-speech from the foreign subtitles).
 
-Single Text File → [LLM] Translate → [LLM] Map.json → [LLM] Gloss Map? → Anki
+### Using an Audio file (NOT a song)
 
-Two Text Files → [LLM] Map.json → ...
+Follow the same steps as you would [for a video](#using-a-video), just using your audio file instead of a video.
+
+### Using a song
+
+1. Create a folder and put your song file inside it
+2. _If you have a .LRC lyrics file for the song_, [convert it into a .srt file](#prompt-for-songs-lrc--srt).
+3. _If you don't have song lyrics_, [generate subtitles for your song](#subtitle-generation). **Make sure to include the --song argument**, as this isolates the vocal tracks and improves transcription quality.
+4. Make sure your subtitles file for the song is in the same folder and named after its language (e.g., `Spanish.srt` or `English.srt`).
+5. [Translate your subtitles](#prompt-translate-foreign--english-subtitles) into the 'opposite' language (English if the subtitles are in your target language, or your target language if the subtitles are in English). Make sure the translated subtitles file is named after its language.
+6. If you want to reverse Engineer your target language's grammar using Leipzig gloss, or need transliterations, [modify the foreign language subtitles](#prompt-optional-add-leipzig-gloss--transliteration-to-foreign-subtitles).
+7. Make sure your folder from step 1 now has the song and both subtitles.
+8. [Generate your Anki deck!](#anki-generation) Make sure to use the `--source-language english` argument if the song is in English (this will generate text-to-speech from the foreign subtitles).
+
+### Using Text
+
+1. Do you have a specific goal with this media (only study clinical dialogue, only learn at an A1 fluency level, etc.)? If yes, [filter the text](#prompt-optional-context-filtering) (or manually edit) to retain only relevant content. If no, or you just want to use all of the content, skip this step.
+2. _If you only have one translation of your text_, [generate a translation](#prompt-translate-foreign--english-text). _If you have both translations already_, skip this step.
+3. [Generate a Map.json file](#mapjson-construction) from your two text translations.
+4. If you want to reverse Engineer your target language's grammar using Leipzig gloss, or need transliterations, [modify the Map.json file](#prompt-optional-add-leipzig-gloss--transliteration-to-foreign-mapped-segments).
+5. Create a folder and place your final `Map.json` file inside it. Make sure it is named `Map.json`.
+6. [Generate your Anki deck!](#anki-generation)
 
 ## Subtitle Generation
 
@@ -162,10 +193,11 @@ python /path/to/Immerse-main/autosrt.py [PUT_MEDIA_PATH_HERE] --model mlx-commun
 ```
 
 ## LLM Prompts (with Claude)
+Use these with your favorite LLM. We generally recommend Claude > Gemini > ChatGPT, but feel free to use whatever works best for you.
 
 ### Map.json Construction
 
-#### Mapping Pre-Existing Translations
+#### PROMPT: Mapping Pre-Existing Translations
 
 Map equivalent text between the provided translation files to generate a JSON file with the following fixed schema:
 ```
@@ -206,7 +238,17 @@ The source is the foreign language file and the target is the English file.
 
 **Option for Longer Texts:** Only map the [n] chapter, "[TITLE]", of the source to its corresponding English chapter.
 
-#### Optional: Add Leipzig gloss & transliteration to foreign mapped segments
+#### PROMPT: Translate Foreign → English Text
+
+```
+You are an expert in natural language translation. Provide an English translation of the following [LANGUAGE] text and generate the same format file using the English content. Use translations most natural to the context of the text.
+```
+
+> For translating English → Foreign:
+> 	1. Replace "English" with the foreign language name
+> 	2. Replace "\[LANGUAGE]" with "English"
+
+#### PROMPT (Optional): Add Leipzig gloss & transliteration to foreign mapped segments
 
 ```
 In this Map.json file, for each element in `segments`, add Leipzig gloss of the element's `source.text` as a string assigned to `source.gloss`. If `source.text` is not in Latin script, also include a transliteration as a string assigned to `source.transliteration`. Generate an updated file of the same format. Be sure to keep all of the original file content, just with the Leipzig gloss and potential transliteration additions.
@@ -214,7 +256,7 @@ In this Map.json file, for each element in `segments`, add Leipzig gloss of the 
 
 ### Subtitle Modifications
 
-#### Translate Foreign → English
+#### PROMPT: Translate Foreign → English Subtitles
 
 ```
 You are an expert in natural language translation. Provide an English translation of the following [LANGUAGE] subtitles and generate the same format subtitle file with the same time intervals using the English dialogue. Use translations most natural to the context of the dialogue in the subtitles.
@@ -227,7 +269,7 @@ You are an expert in natural language translation. Provide an English translatio
 **TODO:**
 - [ ] If there is ambiguity that lends itself to fundamentally different likely interpretations, even within context, provide each possible translation separated by new lines with "OR" as a line between them.
 
-#### Optional: Add Leipzig gloss & transliteration to foreign subtitles
+#### PROMPT (Optional): Add Leipzig gloss & transliteration to foreign subtitles
 
 ```
 Insert Leipzig gloss into the provided [LANGUAGE] subtitles file such that each subtitle interval has the Leipzig gloss on a line beneath the original subtitles. If the subtitles are not in Latin script, include a transliteration on a line beneath the original text, followed by the Leipzig gloss line. Generate an updated subtitles file of the same format. Be sure to keep the same time intervals and original subtitle content.
@@ -236,7 +278,7 @@ Insert Leipzig gloss into the provided [LANGUAGE] subtitles file such that each 
 **TODO:**
 - [ ] Explicate marking any uncertainties or potential artifacts with (?)
 
-#### Optional: Context filtering
+#### PROMPT (Optional): Context filtering
 
 ```
 Filter the provided subtitles file to only retain dialgoue that could be heard or said in [CONTEXT]. Generate an updated subtitles file of the same format. Be sure to keep the same time intervals and original subtitle content for the dialogue that is not removed.
@@ -246,7 +288,7 @@ Filter the provided subtitles file to only retain dialgoue that could be heard o
 > 
 > This can also be modified to filter dialogue for a certain proficiency level (e.g., CEFR B1).
 
-#### Songs: .LRC → .SRT
+#### PROMPT (for Songs): .LRC → .SRT
 
 ```
 Generate subtitles in .srt format using the provided lyrics that are in .lrc format. For each lyric, convert its timestamp to the equivalent starting timestamp in .srt format and set the ending .srt timestamp for that lyric to the timestamp of the next lyric. If the final lyrics are not followed by another timestamp, set its .srt ending timestamp to "99:99:99,000". Be sure to retain the the original, unchanged, lryic content in the subtitles.
