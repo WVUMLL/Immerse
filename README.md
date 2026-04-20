@@ -128,10 +128,10 @@ python -m pip install -U "demucs-mlx[convert]"
 ## Program Workflow
 
 ✨ **START HERE: What media would you like to use?** ✨
-- [A video (clip, recording, episode, movie, etc.)](#using-a-video)
-- [Audio (Recordings, podcasts, etc.)](#using-an-audio-file-not-a-song)
-- [A Song](#using-a-song)
-- [Text (.txt, .docx, .pdf, .epub, etc.)](#using-text)
+- [A video (clip, recording, episode, movie, etc.)](#using-a-video-)
+- [Audio (Recordings, podcasts, etc.)](#using-an-audio-file-not-a-song-)
+- [A Song](#using-a-song-)
+- [Text (.txt, .docx, .pdf, .epub, etc.)](#using-text-)
 
 ### Using a Video 🎥
 
@@ -148,7 +148,7 @@ python -m pip install -U "demucs-mlx[convert]"
 
 ### Using an Audio file (NOT a song) 🔊
 
-Follow the same steps as you would [for a video](#using-a-video), just using your audio file instead of a video.
+Follow the same steps as you would [for a video](#using-a-video-), just using your audio file instead of a video.
 
 ### Using a song 🎶
 
