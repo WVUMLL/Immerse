@@ -292,7 +292,7 @@ Filter the provided subtitles file to only retain dialgoue that could be heard o
 #### PROMPT (for Songs): .LRC → .SRT
 
 ```
-Generate subtitles in .srt format using the provided lyrics that are in .lrc format. For each lyric, convert its timestamp to the equivalent starting timestamp in .srt format and set the ending .srt timestamp for that lyric to the timestamp of the next lyric. If the final lyrics are not followed by another timestamp, set its .srt ending timestamp to "99:99:99,000". Be sure to retain the the original, unchanged, lryic content in the subtitles.
+Generate subtitles in .srt format using the provided lyrics that are in .lrc format. For each lyric, convert its timestamp to the equivalent starting timestamp in .srt format and set the ending .srt timestamp for that lyric to the timestamp of the next lyric. If the final lyrics are not followed by another timestamp, set its .srt ending timestamp to "99:99:99,000". Be sure to retain the the original, unchanged, lyric content in the subtitles.
 ```
 
 ## Anki Generation
