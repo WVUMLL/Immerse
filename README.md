@@ -144,7 +144,7 @@ python -m pip install -U "demucs-mlx[convert]"
 5. Do you have a specific goal with this media (only study clinical dialogue, only learn at an A1 fluency level, etc.)? If yes, [filter the subtitles](#prompt-optional-context-filtering) to retain only relevant content. If no, or you just want to use all of the content, skip this step.
 6. [Translate your subtitles](#prompt-translate-foreign--english-subtitles) into the 'opposite' language (English if the subtitles are in your target language, or your target language if the subtitles are in English). Make sure the translated subtitles file is named after its language.
 7. If you want to reverse Engineer your target language's grammar using Leipzig gloss, or need transliterations, [modify the foreign language subtitles](#prompt-optional-add-leipzig-gloss--transliteration-to-foreign-subtitles). Name these new foreign subtitles after its language (e.g., `Spanish.srt`) and rename the unmodified foreign subtitles in the folder to have "-clean" after the language (e.g., `Spanish-clean.srt`).
-8. Make sure your folder from step 1 now has the video and both subtitles.
+8. Make sure your folder from step 1 now has the video and all subtitle files.
 9. [Generate your Anki deck](#anki-generation)! Make sure to use the `--source-language english` argument if the video you're using is in English (this will generate text-to-speech from the foreign subtitles). If your source video is in English and target language is **Persian (Farsi), Arabic, Tagalog, or Indonesian**, be sure also follow [these instructions](#sherpa-onnx-usage-necessary-for-persian-farsi-arabic-tagalog-and-indonesian-text-to-speech-otherwise-optional).
 
 ### Using an Audio file (NOT a song) 🔊
@@ -159,7 +159,7 @@ Follow the same steps as you would [for a video](#using-a-video-), just using yo
 4. Make sure your subtitles file for the song is in the same folder and named after its language (e.g., `Spanish.srt` or `English.srt`).
 5. [Translate your subtitles](#prompt-translate-foreign--english-subtitles) into the 'opposite' language (English if the subtitles are in your target language, or your target language if the subtitles are in English). Make sure the translated subtitles file is named after its language.
 6. If you want to reverse Engineer your target language's grammar using Leipzig gloss, or need transliterations, [modify the foreign language subtitles](#prompt-optional-add-leipzig-gloss--transliteration-to-foreign-subtitles). Name these new foreign subtitles after its language (e.g., `Spanish.srt`) and rename the unmodified foreign subtitles in the folder to have "-clean" after the language (e.g., `Spanish-clean.srt`).
-7. Make sure your folder from step 1 now has the song and both subtitles.
+7. Make sure your folder from step 1 now has the song and all subtitle files.
 8. [Generate your Anki deck](#anki-generation)! Make sure to use the `--source-language english` argument if the song is in English (this will generate text-to-speech from the foreign subtitles). If your song is in English and target language is **Persian (Farsi), Arabic, Tagalog, or Indonesian**, be sure also follow [these instructions](#sherpa-onnx-usage-necessary-for-persian-farsi-arabic-tagalog-and-indonesian-text-to-speech-otherwise-optional).
 
 ### Using Text 📚
