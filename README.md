@@ -193,7 +193,7 @@ python /path/to/Immerse-main/autosrt.py [PUT_MEDIA_PATH_HERE] --model mlx-commun
 --song
 ```
 
-## LLM Prompts (with Claude)
+## LLM Prompts
 Use these with your favorite LLM. We generally recommend Claude > Gemini > ChatGPT, but feel free to use whatever works best for you.
 
 ### Map.json Construction
