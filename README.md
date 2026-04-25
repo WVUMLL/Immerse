@@ -17,7 +17,8 @@ Developed by Armin Salehipour for WVU Medical Language Learners.
 - [ ] Vocab mode: Cards for individual lexemes (words/phrases)
 	- [ ] Option: Top X number of words
 	- [ ] Option: Filter words based on most default most common vocab list, other text source, or both
- - [ ] Adding cards to existing decks
+- [ ] Quick cards: Paste into a textfield to quickly generate cards without making a text document
+- [ ] Adding cards to existing decks
 
 # How to Install
 
