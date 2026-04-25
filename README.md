@@ -1,6 +1,6 @@
 # Immerse
 A toolkit for transitioning any media resource from passive immersion to active immersion!
-- Generate foreign subtitles, modify subtitles for easier learning, or turn your media into language-learning Anki decks!
+- Generate subtitles and translations, modify subtitles for easier learning, or turn your media into language-learning Anki decks!
 - Compatible with videos (recordings, clips, TV, movies), audio (recordings, podcasts, music), and text (books, articles, pdfs, plain text)
 - Decks designed to promote reading/writing and listening/speaking
 - Generates in-context translations in both directions, English → foreign & foreign → English
