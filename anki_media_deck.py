@@ -163,6 +163,8 @@ class CardItem:
     foreign_transliteration: str = ""
     foreign_ipa: str = ""
     foreign_gloss: str = ""
+    front_gloss_defs: str = ""
+    back_gloss_defs: str = ""
     thumbnail_name: str = ""
     media_name: str = ""
     tts_name: str = ""
@@ -399,6 +401,216 @@ def foreign_html_text(text: str, added_text: str = "") -> str:
     return "<br>".join(escaped_lines)
 
 
+GLOSS_SPLIT_CHARS = " +≈≠≤≥?√$<>⟨⟩~()[]\\|/&;:→›>-=꞊‿._"
+GLOSS_SPLIT_RE = re.compile(f"[{re.escape(GLOSS_SPLIT_CHARS)}]+")
+
+ROMAN_NUMERALS_I_TO_XXV = [
+    "XXV", "XXIV", "XXIII", "XXII", "XXI", "XX",
+    "XIX", "XVIII", "XVII", "XVI", "XV", "XIV", "XIII", "XII", "XI", "X",
+    "IX", "VIII", "VII", "VI", "V", "IV", "III", "II", "I",
+]
+
+GLOSS_PREFIX_RE = re.compile(
+    r"^(12|13|[1234]|" + "|".join(ROMAN_NUMERALS_I_TO_XXV) + r")"
+)
+
+_ABBREVIATIONS_CACHE: Optional[Dict[str, str]] = None
+
+
+def load_abbreviations() -> Dict[str, str]:
+    global _ABBREVIATIONS_CACHE
+
+    if _ABBREVIATIONS_CACHE is not None:
+        return _ABBREVIATIONS_CACHE
+
+    abbreviations_path = Path(__file__).with_name("abbreviations.json")
+
+    if not abbreviations_path.is_file():
+        raise DeckError(
+            f"Gloss definitions require abbreviations.json next to this script: {abbreviations_path}"
+        )
+
+    try:
+        with abbreviations_path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception as exc:
+        raise DeckError(f"Could not read abbreviations.json: {exc}")
+
+    if not isinstance(payload, dict):
+        raise DeckError("abbreviations.json must contain a top-level JSON object.")
+
+    _ABBREVIATIONS_CACHE = {
+        str(key): str(value)
+        for key, value in payload.items()
+        if isinstance(value, str)
+    }
+    return _ABBREVIATIONS_CACHE
+
+
+def person_or_class_prefix_text(prefix: str) -> str:
+    if prefix == "1":
+        return "1st person "
+    if prefix == "2":
+        return "2nd person "
+    if prefix == "3":
+        return "3rd person "
+    if prefix == "12":
+        return "1st and 2nd person "
+    if prefix == "13":
+        return "1st and 3rd person "
+    if prefix == "4":
+        return "[4th person](https://en.wikipedia.org/wiki/Obviative) (= OBV), or 1st person inclusive or indefinite person, "
+    if prefix in ROMAN_NUMERALS_I_TO_XXV:
+        return f"[noun class](https://en.wikipedia.org/wiki/Noun_class) gender {prefix} "
+    return ""
+
+
+def markdown_links_to_html(text: str) -> str:
+    """
+    Convert basic markdown links to HTML links while escaping all other text.
+
+    Supports:
+      [text](https://example.com)
+      [text](https://example.com "Title")
+      [text](https://en.wikipedia.org/wiki/Copula_(linguistics))
+    """
+    if not text:
+        return ""
+
+    pieces: List[str] = []
+    i = 0
+    n = len(text)
+
+    while i < n:
+        label_start = text.find("[", i)
+        if label_start == -1:
+            pieces.append(html.escape(text[i:], quote=False))
+            break
+
+        label_end = text.find("]", label_start + 1)
+        if label_end == -1 or label_end + 1 >= n or text[label_end + 1] != "(":
+            pieces.append(html.escape(text[i:label_start + 1], quote=False))
+            i = label_start + 1
+            continue
+
+        pieces.append(html.escape(text[i:label_start], quote=False))
+
+        url_start = label_end + 2
+        pos = url_start
+        paren_depth = 0
+        url_end = -1
+
+        while pos < n:
+            ch = text[pos]
+
+            if ch == "(":
+                paren_depth += 1
+            elif ch == ")":
+                if paren_depth == 0:
+                    url_end = pos
+                    break
+                paren_depth -= 1
+
+            pos += 1
+
+        if url_end == -1:
+            pieces.append(html.escape(text[label_start:], quote=False))
+            break
+
+        label = text[label_start + 1:label_end]
+        destination = text[url_start:url_end].strip()
+
+        title = ""
+        url = destination
+
+        title_match = re.match(r'^(.*?)\s+"([^"]*)"\s*$', destination)
+        if title_match:
+            url = title_match.group(1).strip()
+            title = title_match.group(2)
+
+        label_html = html.escape(label, quote=False)
+        url_html = html.escape(url, quote=True)
+
+        if title:
+            title_html = html.escape(title, quote=True)
+            pieces.append(f'<a href="{url_html}" title="{title_html}">{label_html}</a>')
+        else:
+            pieces.append(f'<a href="{url_html}">{label_html}</a>')
+
+        i = url_end + 1
+
+    return "".join(pieces)
+
+
+def lookup_gloss_definition(raw_key: str, abbreviations: Dict[str, str]) -> Optional[str]:
+    if raw_key in abbreviations:
+        return abbreviations[raw_key]
+
+    prefix_match = GLOSS_PREFIX_RE.match(raw_key)
+    if not prefix_match:
+        return None
+
+    prefix = prefix_match.group(1)
+    stripped_key = raw_key[len(prefix):]
+
+    if not stripped_key:
+        return None
+
+    if stripped_key not in abbreviations:
+        return None
+
+    return person_or_class_prefix_text(prefix) + abbreviations[stripped_key]
+
+
+def build_gloss_definitions_html(gloss_text: str) -> str:
+    gloss_text = (gloss_text or "").strip()
+    if not gloss_text:
+        return ""
+
+    abbreviations = load_abbreviations()
+    if not abbreviations:
+        return ""
+
+    entries: List[str] = []
+    seen = set()
+
+    for raw_piece in GLOSS_SPLIT_RE.split(gloss_text):
+        key = raw_piece.strip()
+        if not key:
+            continue
+
+        definition = lookup_gloss_definition(key, abbreviations)
+        if not definition:
+            continue
+
+        entry_html = (
+            f'<span class="gloss-key">{html.escape(key, quote=False)}</span> = '
+            f"{markdown_links_to_html(definition)}"
+        )
+
+        if entry_html in seen:
+            continue
+
+        seen.add(entry_html)
+        entries.append(entry_html)
+
+    if not entries:
+        return ""
+
+    return "<br>".join(entries)
+
+
+def append_gloss_defs_html(main_html: str, gloss_defs_html: str) -> str:
+    gloss_defs_html = (gloss_defs_html or "").strip()
+    if not gloss_defs_html:
+        return main_html
+
+    if main_html:
+        return f'{main_html}<div class="gloss-definitions">{gloss_defs_html}</div>'
+
+    return f'<div class="gloss-definitions">{gloss_defs_html}</div>'
+
+
 def html_text(text: str) -> str:
     text = text.replace("\\N", "\n").replace("\\n", "\n")
     text = text.strip()
@@ -506,13 +718,20 @@ def build_map_aligned_pairs(
         source_text = clean_subtitle_text(str(source.get("text", "") or ""))
         target_text = clean_subtitle_text(str(target.get("text", "") or ""))
 
+        source_gloss = clean_subtitle_text(str(source.get("gloss", "") or ""))
+        target_gloss = clean_subtitle_text(str(target.get("gloss", "") or ""))
+
         if english_side == "source":
             english_text = source_text
             foreign_text = target_text
+            english_gloss = source_gloss
+            foreign_gloss = target_gloss
             foreign_obj = target
         else:
             english_text = target_text
             foreign_text = source_text
+            english_gloss = target_gloss
+            foreign_gloss = source_gloss
             foreign_obj = source
 
         if not english_text or not foreign_text:
@@ -524,7 +743,8 @@ def build_map_aligned_pairs(
                 "foreign_text": foreign_text,
                 "transliteration": clean_subtitle_text(str(foreign_obj.get("transliteration", "") or "")),
                 "ipa": clean_subtitle_text(str(foreign_obj.get("ipa", "") or "")),
-                "gloss": clean_subtitle_text(str(foreign_obj.get("gloss", "") or "")),
+                "gloss": foreign_gloss,
+                "english_gloss": english_gloss,
             }
         )
 
@@ -558,6 +778,7 @@ def build_map_aligned_pairs(
             "transliteration": item["transliteration"],
             "ipa": item["ipa"],
             "gloss": item["gloss"],
+            "english_gloss": item["english_gloss"],
             "prev_english_texts": [x["english_text"] for x in prev_items],
             "next_english_texts": [x["english_text"] for x in next_items],
             "prev_foreign_texts": [x["foreign_text"] for x in prev_items],
@@ -1465,6 +1686,23 @@ def create_note_model(model_id: int) -> genanki.Model:
 }
 .subtitle-bottom-line {
   font-size: 0.72em;
+  font-style: italic;
+}
+.gloss-definitions {
+  margin-top: 18px;
+  font-size: 0.72em;
+  font-style: italic;
+  font-weight: normal;
+  line-height: 1.35;
+  color: #ffaa00;
+}
+.gloss-definitions a {
+  color: #00ffff;
+  text-decoration: underline;
+}
+.gloss-key {
+  font-weight: bold;
+  text-decoration: underline;
 }
 #answer {
   margin-top: 18px;
@@ -1487,6 +1725,12 @@ def note_for_direction(
     thumb_tag = f'<img src="{html.escape(card.thumbnail_name)}">' if card.thumbnail_name else ""
     map_front_tag = f'<img src="{html.escape(card.map_front_image_name)}">' if card.map_front_image_name else ""
     map_back_tag = f'<img src="{html.escape(card.map_back_image_name)}">' if card.map_back_image_name else ""
+
+    def with_front_gloss(text_html: str) -> str:
+        return append_gloss_defs_html(text_html, card.front_gloss_defs)
+
+    def with_back_gloss(text_html: str) -> str:
+        return append_gloss_defs_html(text_html, card.back_gloss_defs)
 
     if card.is_map_card:
         map_front_foreign = combine_main_and_small_text(
@@ -1533,8 +1777,8 @@ def note_for_direction(
         return genanki.Note(
             model=model,
             fields=[
-                front_text,
-                back_text,
+                with_front_gloss(front_text),
+                with_back_gloss(back_text),
                 html.escape(removed_last_line if card.is_reverse else "", quote=False),
                 "foreign-like" if card.is_reverse else "english-like",
                 "english-like" if card.is_reverse else "foreign-like",
@@ -1586,8 +1830,8 @@ def note_for_direction(
         return genanki.Note(
             model=model,
             fields=[
-                front_text,
-                back_text,
+                with_front_gloss(front_text),
+                with_back_gloss(back_text),
                 html.escape(removed_last_line, quote=False),
                 "foreign-like",
                 "english-like",
@@ -1626,8 +1870,8 @@ def note_for_direction(
     return genanki.Note(
         model=model,
         fields=[
-            front_text,
-            back_text,
+            with_front_gloss(front_text),
+            with_back_gloss(back_text),
             "",
             "english-like",
             "foreign-like",
@@ -1714,6 +1958,10 @@ def make_cards_from_map(
         transliteration = extras.get("transliteration", "")
         ipa = extras.get("ipa", "")
         gloss = extras.get("gloss", "")
+        english_gloss = extras.get("english_gloss", "")
+
+        foreign_gloss_defs = build_gloss_definitions_html(gloss)
+        english_gloss_defs = build_gloss_definitions_html(english_gloss)
         prev_english_texts = extras.get("prev_english_texts", [])
         next_english_texts = extras.get("next_english_texts", [])
         prev_foreign_texts = extras.get("prev_foreign_texts", [])
@@ -1801,6 +2049,8 @@ def make_cards_from_map(
                 foreign_transliteration=transliteration,
                 foreign_ipa=ipa,
                 foreign_gloss=gloss,
+                front_gloss_defs=english_gloss_defs,
+                back_gloss_defs=foreign_gloss_defs,
                 thumbnail_name="",
                 media_name="",
                 tts_name=tts_name,
@@ -1823,6 +2073,8 @@ def make_cards_from_map(
                     foreign_transliteration=transliteration,
                     foreign_ipa=ipa,
                     foreign_gloss=gloss,
+                    front_gloss_defs=english_gloss_defs,
+                    back_gloss_defs=foreign_gloss_defs,
                     thumbnail_name="",
                     media_name="",
                     tts_name=tts_name,
@@ -1864,6 +2116,8 @@ def make_cards(
         foreign_text = foreign_line.text_plain
         clean_foreign_text = choose_clean_text_for_line(foreign_line, clean_tts_lines)
         foreign_added_text = extract_added_text_from_clean(foreign_text, clean_foreign_text)
+        foreign_added_gloss_defs = build_gloss_definitions_html(foreign_added_text)
+
         part_number = compute_part_number(
             card_index_zero_based=idx,
             clip_start_ms=foreign_line.start_ms,
@@ -1961,6 +2215,8 @@ def make_cards(
                 foreign_text=foreign_text,
                 clean_foreign_text=clean_foreign_text,
                 foreign_added_text=foreign_added_text,
+                front_gloss_defs="",
+                back_gloss_defs=foreign_added_gloss_defs,
                 foreign_transliteration="",
                 foreign_ipa="",
                 foreign_gloss="",
@@ -1985,6 +2241,8 @@ def make_cards(
                     foreign_text=foreign_text,
                     clean_foreign_text=clean_foreign_text,
                     foreign_added_text=foreign_added_text,
+                    front_gloss_defs="",
+                    back_gloss_defs=foreign_added_gloss_defs,
                     foreign_transliteration="",
                     foreign_ipa="",
                     foreign_gloss="",
