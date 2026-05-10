@@ -251,11 +251,15 @@ You are an expert in natural language translation. Provide an English translatio
 > 	1. Replace "English" with the foreign language name
 > 	2. Replace "\[LANGUAGE]" with "English"
 
+> Working around free LLM usage limits? [Try adding this workaround to your prompt!](#prompt-passing-the-torch-a-workaround-for-free-chat-limits)
+
 #### PROMPT (Optional): Add Leipzig gloss & transliteration to foreign mapped segments
 
 ```
 In this Map.json file, for each element in `segments`, add Leipzig gloss of the element's `source.text` as a string assigned to `source.gloss`. If `source.text` is not in Latin script, also include a transliteration as a string assigned to `source.transliteration`. Generate an updated file of the same format. Be sure to keep all of the original file content, just with the Leipzig gloss and potential transliteration additions.
 ```
+
+> Working around free LLM usage limits? Or is the LLM insisting and giving you a program to do the glossing? [Try adding this workaround to your prompt!](#prompt-passing-the-torch-a-workaround-for-free-chat-limits)
 
 ### Subtitle Modifications
 
@@ -269,14 +273,19 @@ You are an expert in natural language translation. Provide an English translatio
 > 	1. Replace "English" with the foreign language name
 > 	2. Replace "\[LANGUAGE]" with "English"
 
+> Working around free LLM usage limits? [Try adding this workaround to your prompt!](#prompt-passing-the-torch-a-workaround-for-free-chat-limits)
+
 **TODO:**
 - [ ] If there is ambiguity that lends itself to fundamentally different likely interpretations, even within context, provide each possible translation separated by new lines with "OR" as a line between them.
 
 #### PROMPT (Optional): Add Leipzig gloss & transliteration to foreign subtitles
 
 ```
-Insert Leipzig gloss into the provided [LANGUAGE] subtitles file such that each subtitle interval has the Leipzig gloss on a line beneath the original subtitles. If the subtitles are not in Latin script, include a transliteration on a line beneath the original text, followed by the Leipzig gloss line. Generate an updated subtitles file of the same format. Be sure to keep the same time intervals and original subtitle content.
+Using the provided [LANGUAGE] subtitles, generate equivalent subtitles in .ass format. Use ASS script resolution `PlayResX: 1920` and `PlayResY: 1080`. Use a readable default subtitle style: Arial, Fontsize 48, white text, black outline, Outline=3, bottom centered. All subtitle content and timing must be the same, with the addition of Leipzig gloss inserted on a line beneath the original subtitles. Make sure to use standard conventional Leipzig gloss abbreviations where appropriate. For the Leipzig gloss lines only, apply inline ASS styling `{\i1\fscx50\fscy50}` and reset afterward with `{\i0\fscx100\fscy100}`. Do not omit `PlayResX` or `PlayResY`. If the subtitles are not in Latin script, include a transliteration on a line beneath the original text (default style) followed by the Leipzig gloss line (additional styling).
 ```
+> Adjust `PlayResX` and `PlayResY` to your video's resolution (default is 1080p). May want to decrease Fontsize for lower resolutions (default is 48).
+
+> Working around free LLM usage limits? Or is the LLM insisting and giving you a program to do the glossing? [Try adding this workaround to your prompt!](#prompt-passing-the-torch-a-workaround-for-free-chat-limits)
 
 **TODO:**
 - [ ] Explicate marking any uncertainties or potential artifacts with (?)
@@ -296,6 +305,15 @@ Filter the provided subtitles file to only retain dialgoue that could be heard o
 ```
 Generate subtitles in .srt format using the provided lyrics that are in .lrc format. For each lyric, convert its timestamp to the equivalent starting timestamp in .srt format and set the ending .srt timestamp for that lyric to the timestamp of the next lyric. If the final lyrics are not followed by another timestamp, set its .srt ending timestamp to "99:99:99,000". Be sure to retain the the original, unchanged, lyric content in the subtitles.
 ```
+
+### Misc
+
+#### PROMPT: Passing the torch (a workaround for free chat limits)
+
+```
+Do not respond with a program that adds an extra step for generating the Leipzig gloss. If you must do it programmatically, do it on the backend and return the finished subtitles file when the task is complete. If finishing this task within the free token limit is unlikely, make sure you return the amount you are able to finish before reaching the limit.
+```
+> This assumes you are on the Leipzig glossing step, since this is where it is usually an issue. But you can remove the first 2 sentences if you just need a general limit workaround.
 
 ## Anki Generation
 
