@@ -802,7 +802,7 @@ HTML_TAG_RE = re.compile(r"<[^>]+>")
 def clean_subtitle_text(text: str) -> str:
     text = text.replace("\u200b", "").replace("\ufeff", "")
     text = ASS_TAG_RE.sub("", text)
-    text = text.replace("\\N", "\n").replace("\\n", "\n")
+    text = text.replace("\\N", "\n").replace("\\n", "\n").replace("\\h", " ")
     text = HTML_TAG_RE.sub("", text)
     text = text.replace("&nbsp;", " ")
 
