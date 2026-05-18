@@ -1564,7 +1564,8 @@ def make_directional_deck_name(
         direction = f"EN \u2192 {foreign_code}"
 
     if split_enabled:
-        return f"{parent_deck_name}::{make_part_label(part_number)} {direction}"
+        part_label = make_part_label(part_number)
+        return f"{parent_deck_name}::{part_label}::{direction}"
 
     return f"{parent_deck_name}::{direction}"
 
