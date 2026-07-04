@@ -140,7 +140,7 @@ python -m pip install -U "demucs-mlx[convert]"
 
 0. The longer your video is, the longer it will take to generate subtitles for it (e.g., it can take a few hours to transcribe 40 minutes). If you don't want to wait that long, or can't use that much of your MacBook's resources at the moment, we recommend splitting longer videos into parts and doing this in batches.
 1. Create a folder and put your video file inside it.
-2. _If you have a subtitles file_, make sure it matches the video's timing and content (sometimes subtitle, especially for non-English languages, differ from what is actually being spoken).
+2. _If you have a subtitles file_, make sure it matches the video's timing and content (sometimes subtitles, especially for non-English languages, differ from what is actually being spoken).
 3. _If you don't have subtitles_, [generate them](#subtitle-generation).
 4. Make sure your subtitles file is in the same folder as your video and named after its language (e.g., `Spanish.srt` or `English.srt`).
 5. Do you have a specific goal with this media (only study clinical dialogue, only learn at an A1 fluency level, etc.)? If yes, [filter the subtitles](#prompt-optional-context-filtering) to retain only relevant content. If no, or you just want to use all of the content, skip this step.
