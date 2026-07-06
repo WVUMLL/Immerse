@@ -293,7 +293,7 @@ Using the provided [LANGUAGE] subtitles, generate equivalent subtitles in .ass f
 #### PROMPT (Optional): Context filtering
 
 ```
-Filter the provided subtitles file to only retain dialgoue that could be heard or said in [CONTEXT]. Generate an updated subtitles file of the same format. Be sure to keep the same time intervals and original subtitle content for the dialogue that is not removed.
+Filter the provided subtitles file to only retain dialogue that could be heard or said in [CONTEXT]. Generate an updated subtitles file of the same format. Be sure to keep the same time intervals and original subtitle content for the dialogue that is not removed.
 ```
 
 > For map.json files, just remove "subtitles". For other text files, replace "subtitles" with "text file".
