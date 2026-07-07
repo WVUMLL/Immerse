@@ -186,7 +186,7 @@ source .anki_immersion_env/bin/activate
 
 #### 2. Execution
 ```
-python /path/to/Immerse-main/autosrt.py [PUT_MEDIA_PATH_HERE] --model mlx-community/whisper-large-v3-mlx
+python /path/to/Immerse-main/autosrt.py [PUT_MEDIA_PATH_HERE] --model mlx-community/whisper-large-v3-mlx --language [PUT_MEDIA_LANGUAGE_HERE]
 ```
 
 ##### Optional Arguments
