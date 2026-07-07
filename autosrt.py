@@ -195,12 +195,12 @@ class Segment:
     language_probability: float = 0.0
 
 
-# @dataclass
-# class DetectionVote:
-#     language: str
-#     probability: float
-#     clip_start: float
-#     clip_duration: float
+@dataclass
+class DetectionVote:
+    language: str
+    probability: float
+    clip_start: float
+    clip_duration: float
 
 
 # -----------------------------
@@ -630,72 +630,68 @@ class FasterWhisperBackend(BackendBase):
 # Primary language detection
 # -----------------------------
 
-# def choose_clip_plan(total_duration: float) -> List[Tuple[float, float]]:
-#     """
-#     Return (start, duration) samples spread across the file.
-#     Keeps clips away from exact edges when possible.
-#     """
-#     clip_len = 30.0
-#     if total_duration <= 45:
-#         return [(0.0, total_duration)]
+def choose_clip_plan(total_duration: float) -> List[Tuple[float, float]]:
+    """
+    Return (start, duration) samples spread across the file.
+    Keeps clips away from exact edges when possible.
+    """
+    clip_len = 30.0
+    if total_duration <= 45:
+        return [(0.0, total_duration)]
 
-#     positions = [0.10, 0.50, 0.90]
-#     clips: List[Tuple[float, float]] = []
-#     for p in positions:
-#         center = total_duration * p
-#         start = max(0.0, min(center - clip_len / 2.0, total_duration - clip_len))
-#         duration = min(clip_len, total_duration - start)
-#         if duration >= 8.0:
-#             clips.append((start, duration))
+    positions = [0.10, 0.25, 0.50, 0.75, 0.90]
+    clips: List[Tuple[float, float]] = []
 
-#     # Deduplicate nearly-identical clips for short media.
-#     deduped: List[Tuple[float, float]] = []
-#     for start, dur in clips:
-#         if not deduped or abs(start - deduped[-1][0]) > 3.0:
-#             deduped.append((start, dur))
-#     return deduped
+    for p in positions:
+        center = total_duration * p
+        start = max(0.0, min(center - clip_len / 2.0, total_duration - clip_len))
+        duration = min(clip_len, total_duration - start)
+        if duration >= 8.0:
+            clips.append((start, duration))
+
+    deduped: List[Tuple[float, float]] = []
+    for start, dur in clips:
+        if not deduped or abs(start - deduped[-1][0]) > 3.0:
+            deduped.append((start, dur))
+
+    return deduped
 
 
-# def detect_primary_language(
-#     backend: BackendBase,
-#     input_media: pathlib.Path,
-#     workdir: pathlib.Path,
-# ) -> Tuple[str, List[DetectionVote]]:
-#     duration = probe_duration_seconds(input_media)
-#     plan = choose_clip_plan(duration)
+def detect_primary_language(
+    backend: BackendBase,
+    input_audio_source: pathlib.Path,
+    workdir: pathlib.Path,
+) -> Tuple[str, List[DetectionVote]]:
+    duration = probe_duration_seconds(input_audio_source)
+    plan = choose_clip_plan(duration)
 
-#     votes: List[DetectionVote] = []
-#     for idx, (start, clip_dur) in enumerate(plan, start=1):
-#         clip_wav = workdir / f"lang_probe_{idx}.wav"
-#         extract_wav(input_media, clip_wav, start=start, duration=clip_dur)
-#         lang, prob = backend.detect_language(clip_wav)
-#         votes.append(DetectionVote(
-#             language=lang,
-#             probability=prob,
-#             clip_start=start,
-#             clip_duration=clip_dur,
-#         ))
+    votes: List[DetectionVote] = []
 
-#     if not votes:
-#         raise RuntimeError("Could not obtain any language-detection samples.")
+    for idx, (start, clip_dur) in enumerate(plan, start=1):
+        clip_wav = workdir / f"lang_probe_{idx}.wav"
+        extract_wav(input_audio_source, clip_wav, start=start, duration=clip_dur)
 
-#     counter = collections.Counter(v.language for v in votes)
-#     most_common = counter.most_common()
+        lang, prob = backend.detect_language(clip_wav)
+        votes.append(
+            DetectionVote(
+                language=lang,
+                probability=prob,
+                clip_start=start,
+                clip_duration=clip_dur,
+            )
+        )
 
-#     # Majority by count first, then by summed probability.
-#     top_count = most_common[0][1]
-#     tied_langs = [lang for lang, count in most_common if count == top_count]
+    if not votes:
+        raise RuntimeError("Could not obtain any language-detection samples.")
 
-#     if len(tied_langs) == 1:
-#         return tied_langs[0], votes
+    score_by_lang: Dict[str, float] = collections.defaultdict(float)
 
-#     score_by_lang: Dict[str, float] = collections.defaultdict(float)
-#     for vote in votes:
-#         if vote.language in tied_langs:
-#             score_by_lang[vote.language] += vote.probability
+    for vote in votes:
+        weight = vote.probability if vote.probability > 0 else 1.0
+        score_by_lang[vote.language] += weight * vote.clip_duration
 
-#     primary = max(score_by_lang.items(), key=lambda kv: kv[1])[0]
-#     return primary, votes
+    primary = max(score_by_lang.items(), key=lambda kv: kv[1])[0]
+    return primary, votes
 
 
 # -----------------------------
@@ -842,6 +838,7 @@ def repair_repetition_drift(
     workdir: pathlib.Path,
     segments: List[Segment],
     *,
+    language: Optional[str] = None,
     max_repairs: int = 8,
 ) -> List[Segment]:
     repaired = list(segments)
@@ -865,7 +862,7 @@ def repair_repetition_drift(
             input_audio_source,
             workdir,
             start_time=drift_start_time,
-            language=None,
+            language=language,
             condition_on_previous_text=False,
         )
 
@@ -976,6 +973,31 @@ def language_display_name(lang_code: str) -> str:
     return LANGUAGE_NAMES.get(lang_code, lang_code.title())
 
 
+def normalize_language_argument(value: str) -> str:
+    """
+    Turn a user-supplied language (a Whisper code like 'fr' or a name like
+    'French', in any capitalization) into the Whisper language code.
+    """
+    cleaned = value.strip().lower()
+
+    if cleaned in LANGUAGE_NAMES:
+        return cleaned
+
+    aliases = {"chinese": "zh"}
+    if cleaned in aliases:
+        return aliases[cleaned]
+
+    for code, name in LANGUAGE_NAMES.items():
+        if name.lower() == cleaned:
+            return code
+
+    raise RuntimeError(
+        f"Unknown language: {value!r}. Use a Whisper code such as "
+        "'fr', 'es', 'de', 'ja', or a full name such as "
+        "'French', 'Spanish', 'German', 'Japanese'."
+    )
+
+
 def sanitize_filename(name: str) -> str:
     clean = SAFE_FILENAME_RE.sub("", name).strip()
     return clean or "Subtitles"
@@ -990,6 +1012,7 @@ def transcribe_media(
     backend_name: str,
     model_name: str,
     song_mode: bool = False,
+    forced_language: Optional[str] = None,
 ) -> pathlib.Path:
     require_tool("ffmpeg")
     require_tool("ffprobe")
@@ -1028,11 +1051,32 @@ def transcribe_media(
             transcription_wav = vocals_wav
             print(f"Using isolated vocals for transcription: {transcription_wav}")
 
-        print("Running initial full transcription...")
+        if forced_language is not None:
+            primary_lang = forced_language
+            print(
+                "Skipping language auto-detection; using language from "
+                f"--language: {primary_lang} ({language_display_name(primary_lang)})"
+            )
+        else:
+            print("Detecting primary language before transcription...")
+            primary_lang, detection_votes = detect_primary_language(
+                backend,
+                transcription_wav,
+                workdir,
+            )
+
+            print(f"Detected primary language: {primary_lang} ({language_display_name(primary_lang)})")
+            for vote in detection_votes:
+                print(
+                    f"  sample at {vote.clip_start:.1f}s: "
+                    f"{vote.language} probability={vote.probability:.3f}"
+                )
+
+        print("Running initial full transcription with primary language locked...")
         try:
             raw_segments = backend.transcribe(
                 transcription_wav,
-                language=None,
+                language=primary_lang,
                 condition_on_previous_text=True,
             )
         except Exception as exc:
@@ -1041,7 +1085,7 @@ def transcribe_media(
                 fallback = FasterWhisperBackend(model_name="large-v3")
                 raw_segments = fallback.transcribe(
                     full_wav,
-                    language=None,
+                    language=primary_lang,
                     condition_on_previous_text=True,
                 )
                 backend = fallback
@@ -1057,6 +1101,7 @@ def transcribe_media(
             transcription_wav,
             workdir,
             raw_segments,
+            language=primary_lang,
         )
 
         print("Detecting language for each subtitle segment...")
@@ -1067,8 +1112,7 @@ def transcribe_media(
             repaired_segments,
         )
 
-        primary_lang = choose_primary_language_by_duration(annotated_segments)
-        print(f"Primary language by subtitle duration: {primary_lang} ({language_display_name(primary_lang)})")
+        print(f"Primary language used for output: {primary_lang} ({language_display_name(primary_lang)})")
         if primary_lang in ENGLISH_LANGUAGE_CODES:
             print("Primary language is English; keeping all subtitle segments.")
         else:
@@ -1119,6 +1163,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "before transcription."
         ),
     )
+    parser.add_argument(
+        "--language",
+        default=None,
+        help=(
+            "Skip auto-detection and lock transcription to this language. "
+            "Accepts a Whisper code like 'fr' or a name like 'French'. "
+            "Default: detect the language automatically."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -1127,11 +1180,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     input_media = pathlib.Path(args.media).expanduser().resolve()
 
     try:
+        forced_language = None
+        if args.language is not None:
+            forced_language = normalize_language_argument(args.language)
+
         output = transcribe_media(
             input_media=input_media,
             backend_name=args.backend,
             model_name=args.model,
             song_mode=args.song,
+            forced_language=forced_language,
         )
         print(f"\nWrote subtitles: {output}")
         return 0
