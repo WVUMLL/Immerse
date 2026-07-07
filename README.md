@@ -243,6 +243,8 @@ The source is the foreign language file and the target is the English file.
 
 #### PROMPT: Translate Foreign → English Text
 
+**⚠️ Major LLMs like Claude are starting to get more aggressive about refusing to translate copyrighted material. If you run into this issue, a quick workaround (of potentially lesser quality) is to put the origianl text into a PDF file, then translate the PDF using [Google Translate](https://translate.google.com/?sl=auto&tl=en&op=docs). ⚠️**
+
 ```
 You are an expert in natural language translation. Provide an English translation of the following [LANGUAGE] text and generate the same format file using the English content. Use translations most natural to the context of the text.
 ```
@@ -264,6 +266,8 @@ In this Map.json file, for each element in `segments`, add Leipzig gloss of the 
 ### Subtitle Modifications
 
 #### PROMPT: Translate Foreign → English Subtitles
+
+**⚠️ Major LLMs like Claude are starting to get more aggressive about refusing to translate copyrighted material. If you run into this issue, a quick workaround (of potentially lesser quality) is to copy the .srt text, put it into a PDF file, then translate the PDF using [Google Translate](https://translate.google.com/?sl=auto&tl=en&op=docs). ⚠️**
 
 ```
 You are an expert in natural language translation. Provide an English translation of the following [LANGUAGE] subtitles and generate the same format subtitle file with the same time intervals using the English dialogue. Use translations most natural to the context of the dialogue in the subtitles.
