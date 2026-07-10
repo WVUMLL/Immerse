@@ -834,11 +834,118 @@ def looks_like_dialogue(text: str) -> bool:
     return letters > 0
 
 
+_SRT_TIME_RE = r"\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}"
+_SRT_ENTRY_RE = re.compile(
+    rf"(?:(?P<idx>\d+)\s+)?(?P<start>{_SRT_TIME_RE})\s*-->\s*(?P<end>{_SRT_TIME_RE})"
+)
+# Matches a timestamp pair that is followed, on the SAME line, by subtitle text.
+# pysubs2 silently discards that trailing text, so its presence means the file
+# needs normalizing even if pysubs2 otherwise produced non-empty events.
+_SRT_TEXT_ON_STAMP_RE = re.compile(
+    rf"{_SRT_TIME_RE}\s*-->\s*{_SRT_TIME_RE}[^\S\n]*\S"
+)
+
+
+def _read_text_best_effort(path: Path) -> str:
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return Path(path).read_text(encoding=encoding)
+        except (UnicodeDecodeError, OSError):
+            continue
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _strip_stray_index_lines(text: str) -> str:
+    """Drop bare-integer lines left over from indices that had no timestamp.
+
+    In loosely-formatted files an index number can end up stranded inside a
+    cue's text (e.g. 'What's in the CCP,\\n228\\nMel?'). Only remove such a line
+    when other real text remains, so a cue whose entire text is a number is
+    left untouched.
+    """
+    parts = text.split("\n")
+    kept = [p for p in parts if not re.fullmatch(r"\s*\d+\s*", p)]
+    if kept and len(kept) != len(parts):
+        return "\n".join(kept)
+    return text
+
+
+def _normalize_srt_content(content: str) -> str:
+    """Rebuild loosely-formatted SRT into canonical blocks.
+
+    Handles two malformations that pysubs2 mishandles:
+      * subtitle text placed on the same line as the '-->' timestamp
+      * missing blank line (or missing line breaks entirely) between entries
+
+    Each subtitle's text is taken as everything between the end of its
+    timestamp and the start of the next entry (an optional index number
+    directly preceding the next timestamp is treated as that entry's index,
+    not as text). Blocks are re-emitted in canonical form with fresh,
+    sequential indices.
+    """
+    matches = list(_SRT_ENTRY_RE.finditer(content))
+    if not matches:
+        return content
+
+    out: List[str] = []
+    for i, m in enumerate(matches):
+        start_ts = m.group("start").replace(".", ",")
+        end_ts = m.group("end").replace(".", ",")
+        text_start = m.end()
+        text_end = matches[i + 1].start() if i + 1 < len(matches) else len(content)
+        text = content[text_start:text_end].strip()
+        text = _strip_stray_index_lines(text)
+        out.append(str(i + 1))
+        out.append(f"{start_ts} --> {end_ts}")
+        out.append(text)
+        out.append("")
+    return "\n".join(out)
+
+
 def load_subtitles(path: Path, fps: Optional[float] = None) -> List[SubtitleLine]:
     kwargs = {}
     if path.suffix.lower() == ".sub" and fps is not None:
         kwargs["fps"] = fps
-    subs = pysubs2.load(str(path), **kwargs)
+
+    try:
+        subs = pysubs2.load(str(path), **kwargs)
+    except Exception:
+        subs = None
+
+    def _nonempty_count(events) -> int:
+        if events is None:
+            return 0
+        return sum(1 for e in events if (getattr(e, "text", "") or "").strip())
+
+    # Rebuild loosely-formatted .srt files into canonical SRT and reparse when
+    # pysubs2 either (a) failed to load, (b) produced no usable text, or
+    # (c) the raw file places subtitle text on the same line as the timestamp
+    # (which pysubs2 silently discards). Well-formed files hit none of these
+    # and keep pysubs2's original result untouched.
+    if path.suffix.lower() == ".srt":
+        raw = ""
+        needs_normalize = subs is None or _nonempty_count(subs) == 0
+        if not needs_normalize:
+            raw = _read_text_best_effort(path)
+            needs_normalize = bool(_SRT_TEXT_ON_STAMP_RE.search(raw))
+        if needs_normalize:
+            if not raw:
+                raw = _read_text_best_effort(path)
+            if raw.strip():
+                normalized = _normalize_srt_content(raw)
+                try:
+                    reparsed = pysubs2.SSAFile.from_string(normalized, format_="srt")
+                except Exception:
+                    reparsed = None
+                if _nonempty_count(reparsed) > 0:
+                    subs = reparsed
+
+    if subs is None:
+        subs = pysubs2.SSAFile()
+
     lines: List[SubtitleLine] = []
     for item in subs:
         text_raw = getattr(item, "text", "") or ""
@@ -1129,21 +1236,25 @@ def extract_added_text_from_clean(full_text: str, clean_text: str) -> str:
     full_text = full_text.replace("\\N", "\n").replace("\\n", "\n").strip()
     clean_text = clean_text.replace("\\N", "\n").replace("\\n", "\n").strip()
 
-    if not full_text or not clean_text or full_text == clean_text:
+    if not full_text or not clean_text:
         return ""
 
     full_lines = [line.strip() for line in full_text.splitlines() if line.strip()]
-    clean_lines = [line.strip() for line in clean_text.splitlines() if line.strip()]
+    clean_words = clean_text.split()
 
-    if not full_lines or not clean_lines:
+    if not full_lines or not clean_words:
         return ""
 
-    if len(full_lines) > len(clean_lines) and full_lines[:len(clean_lines)] == clean_lines:
-        return "\n".join(full_lines[len(clean_lines):]).strip()
-
-    if full_text.startswith(clean_text):
-        remainder = full_text[len(clean_text):].strip()
-        return remainder
+    # Thorough clean subtitle comparison
+    accumulated_words = []
+    for i, line in enumerate(full_lines):
+        accumulated_words.extend(line.split())
+        if accumulated_words == clean_words:
+            return "\n".join(full_lines[i + 1:]).strip()
+        if accumulated_words != clean_words[:len(accumulated_words)]:
+            # The full text diverges from the clean text, so there is no
+            # clear additive suffix. Keep the old safe behavior.
+            return ""
 
     return ""
 
